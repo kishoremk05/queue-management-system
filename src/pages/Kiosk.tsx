@@ -288,6 +288,13 @@ export default function Kiosk() {
                     {service.prefix}
                   </div>
                   <h3 className="text-lg sm:text-xl lg:text-2xl font-black text-slate-900 mb-2 group-hover:text-violet-700 transition-colors line-clamp-2">{service.name}</h3>
+                  {service.show_price_on_kiosk !== false && service.price > 0 && (
+                    <div className="mt-1 mb-2 inline-flex items-center justify-center px-4 py-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100">
+                      <span className="font-bold text-sm sm:text-base tracking-wide flex items-center gap-1">
+                        {service.price_currency || "USD"} {(service.price / 100).toFixed(2)}
+                      </span>
+                    </div>
+                  )}
                   <p className="text-[10px] sm:text-xs lg:text-sm font-bold text-slate-400 mt-auto uppercase tracking-widest group-hover:text-violet-500">Tap to select</p>
                 </button>
               ))}
