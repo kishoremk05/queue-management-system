@@ -3,6 +3,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
@@ -16,15 +17,19 @@ import {
   CheckCircle2,
   ClipboardList,
   Copy,
+  CreditCard,
   Download,
   ExternalLink,
   FileText,
   Hash,
   LayoutDashboard,
+  Link2,
   LogOut,
   Monitor,
   Plus,
+  Save,
   ScanLine,
+  Settings,
   Trash2,
   TrendingUp,
   Users,
@@ -58,6 +63,22 @@ export default function CompanyDashboard() {
   const [reportPeriod, setReportPeriod] = useState<"daily" | "weekly" | "monthly">("weekly");
   const [reportLoading, setReportLoading] = useState(false);
 
+  // ── Settings state ─────────────────────────────────────────────────────────
+  const [orgProfile, setOrgProfile] = useState({
+    name: "",
+    contact_email: "",
+    contact_phone: "",
+    timezone: "UTC",
+    default_currency: "USD",
+    address: "",
+    website_url: "",
+  });
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [subscription, setSubscription] = useState<any>(null);
+  const [servicePrices, setServicePrices] = useState<Record<string, { price: string; currency: string; show_price_on_kiosk: boolean; estimated_duration_minutes: string; description: string }>>({});
+  const [savingPrices, setSavingPrices] = useState(false);
+  const [inviteCopied, setInviteCopied] = useState(false);
+
   const fetchAll = async () => {
     if (!organizationId) return;
     const [svc, ctr, staff, tkn] = await Promise.all([
@@ -71,10 +92,47 @@ export default function CompanyDashboard() {
     setStaffRequests(staff.data || []);
     setTokens(tkn.data || []);
     setLoading(false);
+
+    // Initialize service price map
+    const priceMap: typeof servicePrices = {};
+    for (const s of svc.data || []) {
+      priceMap[s.id] = {
+        price: s.price ? String(s.price / 100) : "0",
+        currency: s.price_currency || "USD",
+        show_price_on_kiosk: s.show_price_on_kiosk !== false,
+        estimated_duration_minutes: String(s.estimated_duration_minutes || 15),
+        description: s.description || "",
+      };
+    }
+    setServicePrices(priceMap);
+  };
+
+  const fetchOrgProfile = async () => {
+    if (!organizationId) return;
+    const { data } = await supabase
+      .from("organizations")
+      .select("name, contact_email, contact_phone, timezone, default_currency, address, website_url")
+      .eq("id", organizationId)
+      .maybeSingle();
+    if (data) setOrgProfile({ name: data.name || "", contact_email: data.contact_email || "", contact_phone: data.contact_phone || "", timezone: data.timezone || "UTC", default_currency: data.default_currency || "USD", address: data.address || "", website_url: data.website_url || "" });
+  };
+
+  const fetchSubscription = async () => {
+    if (!organizationId) return;
+    const { data } = await supabase
+      .from("organization_subscriptions")
+      .select("*")
+      .eq("organization_id", organizationId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    setSubscription(data || null);
   };
 
   useEffect(() => {
     fetchAll();
+    void fetchOrgProfile();
+    void fetchSubscription();
   }, [organizationId]);
 
   const loadReport = async () => {
@@ -167,6 +225,69 @@ export default function CompanyDashboard() {
     }
   };
 
+  const saveOrgProfile = async () => {
+    if (!organizationId) return;
+    setSavingProfile(true);
+    try {
+      const { error } = await supabase
+        .from("organizations")
+        .update({
+          name: orgProfile.name,
+          contact_email: orgProfile.contact_email || null,
+          contact_phone: orgProfile.contact_phone || null,
+          timezone: orgProfile.timezone,
+          default_currency: orgProfile.default_currency,
+          address: orgProfile.address || null,
+          website_url: orgProfile.website_url || null,
+          updated_at: new Date().toISOString(),
+        } as any)
+        .eq("id", organizationId);
+      if (error) throw error;
+      toast.success("Company profile updated!");
+    } catch (err: any) {
+      toast.error(err.message || "Failed to save profile");
+    } finally {
+      setSavingProfile(false);
+    }
+  };
+
+  const saveServicePrices = async () => {
+    setSavingPrices(true);
+    try {
+      await Promise.all(
+        services.map((s) => {
+          const p = servicePrices[s.id];
+          if (!p) return Promise.resolve();
+          return supabase.from("services").update({
+            price: Math.round((parseFloat(p.price) || 0) * 100),
+            price_currency: p.currency,
+            show_price_on_kiosk: p.show_price_on_kiosk,
+            estimated_duration_minutes: parseInt(p.estimated_duration_minutes) || 15,
+            description: p.description || null,
+          } as any).eq("id", s.id);
+        })
+      );
+      toast.success("Service pricing saved!");
+      await fetchAll();
+    } catch (err: any) {
+      toast.error(err.message || "Failed to save prices");
+    } finally {
+      setSavingPrices(false);
+    }
+  };
+
+  const copyInviteLink = async () => {
+    const link = `${window.location.origin}/staff-signup?org=${organizationId}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      setInviteCopied(true);
+      toast.success("Invite link copied!");
+      setTimeout(() => setInviteCopied(false), 3000);
+    } catch {
+      toast.error("Failed to copy link");
+    }
+  };
+
   // Stats
   const activeTokens = tokens.filter((t) => t.status === "waiting" || t.status === "serving").length;
   const servedToday = tokens.filter((t) => t.status === "done").length;
@@ -254,6 +375,9 @@ export default function CompanyDashboard() {
               </TabsTrigger>
               <TabsTrigger value="reports" className="rounded-xl px-4 font-semibold text-slate-500 data-[state=active]:bg-violet-50 data-[state=active]:text-violet-700 data-[state=active]:shadow-sm transition-all">
                 <BarChart3 className="h-4 w-4 mr-2" /> Reports
+              </TabsTrigger>
+              <TabsTrigger value="settings" className="rounded-xl px-4 font-semibold text-slate-500 data-[state=active]:bg-violet-50 data-[state=active]:text-violet-700 data-[state=active]:shadow-sm transition-all">
+                <Settings className="h-4 w-4 mr-2" /> Settings
               </TabsTrigger>
             </TabsList>
 
@@ -608,6 +732,215 @@ export default function CompanyDashboard() {
                   </div>
                 )}
               </div>
+            </TabsContent>
+
+            {/* ─── Settings Tab ─── */}
+            <TabsContent value="settings" className="space-y-6 animate-fade-up">
+
+              {/* Company Profile */}
+              <div className="rounded-3xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+                <div className="flex items-center gap-3 border-b border-slate-100 px-6 py-4 bg-gradient-to-r from-violet-50 to-slate-50">
+                  <div className="grid h-9 w-9 place-items-center rounded-xl bg-violet-100">
+                    <Settings className="h-4 w-4 text-violet-600" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-slate-900">Company Profile</h3>
+                    <p className="text-xs text-slate-500 font-medium">Your company information visible to staff and customers</p>
+                  </div>
+                </div>
+                <div className="p-6 grid gap-5 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs font-bold uppercase tracking-widest text-slate-500">Company Name</Label>
+                    <Input value={orgProfile.name} onChange={(e) => setOrgProfile(p => ({ ...p, name: e.target.value }))} className="h-11 rounded-xl border-slate-200 bg-slate-50 font-medium focus:border-violet-500 focus:ring-violet-500" placeholder="Acme Corp" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs font-bold uppercase tracking-widest text-slate-500">Contact Email</Label>
+                    <Input type="email" value={orgProfile.contact_email} onChange={(e) => setOrgProfile(p => ({ ...p, contact_email: e.target.value }))} className="h-11 rounded-xl border-slate-200 bg-slate-50 font-medium focus:border-violet-500 focus:ring-violet-500" placeholder="hello@company.com" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs font-bold uppercase tracking-widest text-slate-500">Phone Number</Label>
+                    <Input value={orgProfile.contact_phone} onChange={(e) => setOrgProfile(p => ({ ...p, contact_phone: e.target.value }))} className="h-11 rounded-xl border-slate-200 bg-slate-50 font-medium focus:border-violet-500 focus:ring-violet-500" placeholder="+1 555 000 0000" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs font-bold uppercase tracking-widest text-slate-500">Website URL</Label>
+                    <Input value={orgProfile.website_url} onChange={(e) => setOrgProfile(p => ({ ...p, website_url: e.target.value }))} className="h-11 rounded-xl border-slate-200 bg-slate-50 font-medium focus:border-violet-500 focus:ring-violet-500" placeholder="https://yourcompany.com" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs font-bold uppercase tracking-widest text-slate-500">Default Currency</Label>
+                    <select value={orgProfile.default_currency} onChange={(e) => setOrgProfile(p => ({ ...p, default_currency: e.target.value }))} className="w-full h-11 rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm font-bold text-slate-700 focus:border-violet-400 focus:outline-none">
+                      {["USD","EUR","GBP","NGN","GHS","KES","ZAR","INR","CAD","AUD"].map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs font-bold uppercase tracking-widest text-slate-500">Timezone</Label>
+                    <select value={orgProfile.timezone} onChange={(e) => setOrgProfile(p => ({ ...p, timezone: e.target.value }))} className="w-full h-11 rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm font-bold text-slate-700 focus:border-violet-400 focus:outline-none">
+                      {["UTC","Africa/Lagos","Africa/Accra","Africa/Nairobi","Africa/Johannesburg","America/New_York","America/Chicago","America/Los_Angeles","Europe/London","Europe/Paris","Asia/Dubai","Asia/Kolkata","Asia/Singapore"].map(tz => <option key={tz} value={tz}>{tz}</option>)}
+                    </select>
+                  </div>
+                  <div className="space-y-1.5 sm:col-span-2">
+                    <Label className="text-xs font-bold uppercase tracking-widest text-slate-500">Address</Label>
+                    <Input value={orgProfile.address} onChange={(e) => setOrgProfile(p => ({ ...p, address: e.target.value }))} className="h-11 rounded-xl border-slate-200 bg-slate-50 font-medium focus:border-violet-500 focus:ring-violet-500" placeholder="123 Main St, City, Country" />
+                  </div>
+                </div>
+                <div className="px-6 pb-6">
+                  <Button onClick={saveOrgProfile} disabled={savingProfile} className="h-11 px-6 bg-gradient-to-r from-violet-600 to-blue-600 text-white font-bold rounded-xl shadow-md hover:shadow-violet-500/30 transition-all hover:-translate-y-0.5 disabled:opacity-70">
+                    {savingProfile ? <span className="flex items-center gap-2"><span className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Saving...</span> : <span className="flex items-center gap-2"><Save className="h-4 w-4" /> Save Profile</span>}
+                  </Button>
+                </div>
+              </div>
+
+              {/* Service Pricing */}
+              <div className="rounded-3xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+                <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4 bg-gradient-to-r from-emerald-50 to-slate-50">
+                  <div className="flex items-center gap-3">
+                    <div className="grid h-9 w-9 place-items-center rounded-xl bg-emerald-100">
+                      <CreditCard className="h-4 w-4 text-emerald-600" />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-slate-900">Service Pricing</h3>
+                      <p className="text-xs text-slate-500 font-medium">Set what customers pay for each service at your kiosk</p>
+                    </div>
+                  </div>
+                </div>
+                {services.length === 0 ? (
+                  <div className="text-center py-12 text-slate-400">
+                    <Box className="h-8 w-8 mx-auto mb-2 opacity-40" />
+                    <p className="text-sm font-medium">No services yet. Add services in the Services tab first.</p>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-slate-100">
+                    {services.map((s) => {
+                      const p = servicePrices[s.id] || { price: "0", currency: orgProfile.default_currency || "USD", show_price_on_kiosk: true, estimated_duration_minutes: "15", description: "" };
+                      return (
+                        <div key={s.id} className="px-6 py-5">
+                          <div className="flex items-start justify-between mb-4">
+                            <div>
+                              <p className="font-bold text-slate-900">{s.name}</p>
+                              <p className="text-xs text-slate-400 font-medium">Prefix: {s.prefix}</p>
+                            </div>
+                            <label className="flex items-center gap-2 cursor-pointer">
+                              <span className="text-xs font-bold text-slate-500">Show price on kiosk</span>
+                              <button
+                                type="button"
+                                onClick={() => setServicePrices(prev => ({ ...prev, [s.id]: { ...p, show_price_on_kiosk: !p.show_price_on_kiosk } }))}
+                                className={`relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ${p.show_price_on_kiosk ? "bg-emerald-500" : "bg-slate-200"}`}
+                              >
+                                <span className={`pointer-events-none block h-4 w-4 rounded-full bg-white shadow-lg ring-0 transition-transform duration-200 ${p.show_price_on_kiosk ? "translate-x-4" : "translate-x-0"}`} />
+                              </button>
+                            </label>
+                          </div>
+                          <div className="grid gap-3 sm:grid-cols-4">
+                            <div className="space-y-1">
+                              <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Price</Label>
+                              <Input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={p.price}
+                                onChange={(e) => setServicePrices(prev => ({ ...prev, [s.id]: { ...p, price: e.target.value } }))}
+                                className="h-10 rounded-xl border-slate-200 bg-slate-50 font-bold text-slate-900 focus:border-violet-500"
+                                placeholder="0.00"
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Currency</Label>
+                              <select value={p.currency} onChange={(e) => setServicePrices(prev => ({ ...prev, [s.id]: { ...p, currency: e.target.value } }))} className="w-full h-10 rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm font-bold text-slate-700 focus:border-violet-400 focus:outline-none">
+                                {["USD","EUR","GBP","NGN","GHS","KES","ZAR","INR"].map(c => <option key={c} value={c}>{c}</option>)}
+                              </select>
+                            </div>
+                            <div className="space-y-1">
+                              <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Duration (min)</Label>
+                              <Input
+                                type="number"
+                                min="1"
+                                value={p.estimated_duration_minutes}
+                                onChange={(e) => setServicePrices(prev => ({ ...prev, [s.id]: { ...p, estimated_duration_minutes: e.target.value } }))}
+                                className="h-10 rounded-xl border-slate-200 bg-slate-50 font-bold text-slate-900 focus:border-violet-500"
+                              />
+                            </div>
+                            <div className="space-y-1 sm:col-span-1">
+                              <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Description</Label>
+                              <Input
+                                value={p.description}
+                                onChange={(e) => setServicePrices(prev => ({ ...prev, [s.id]: { ...p, description: e.target.value } }))}
+                                className="h-10 rounded-xl border-slate-200 bg-slate-50 font-medium text-slate-900 focus:border-violet-500"
+                                placeholder="Optional"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {services.length > 0 && (
+                  <div className="px-6 pb-6 pt-2">
+                    <Button onClick={saveServicePrices} disabled={savingPrices} className="h-11 px-6 bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-bold rounded-xl shadow-md hover:shadow-emerald-500/30 transition-all hover:-translate-y-0.5 disabled:opacity-70">
+                      {savingPrices ? <span className="flex items-center gap-2"><span className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Saving...</span> : <span className="flex items-center gap-2"><Save className="h-4 w-4" /> Save Pricing</span>}
+                    </Button>
+                  </div>
+                )}
+              </div>
+
+              {/* Subscription Info */}
+              <div className="rounded-3xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+                <div className="flex items-center gap-3 border-b border-slate-100 px-6 py-4 bg-gradient-to-r from-blue-50 to-slate-50">
+                  <div className="grid h-9 w-9 place-items-center rounded-xl bg-blue-100">
+                    <CreditCard className="h-4 w-4 text-blue-600" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-slate-900">Subscription</h3>
+                    <p className="text-xs text-slate-500 font-medium">Your current Smart Queue plan</p>
+                  </div>
+                </div>
+                <div className="p-6">
+                  {subscription ? (
+                    <div className="grid gap-4 sm:grid-cols-3">
+                      {[
+                        { label: "Plan", value: subscription.plan_id || "—" },
+                        { label: "Status", value: subscription.status || "—" },
+                        { label: "Amount", value: subscription.currency ? `${subscription.currency} ${((subscription.amount || 0) / 100).toFixed(2)}/mo` : "—" },
+                        { label: "Period Start", value: subscription.current_period_start ? new Date(subscription.current_period_start).toLocaleDateString() : "—" },
+                        { label: "Period End", value: subscription.current_period_end ? new Date(subscription.current_period_end).toLocaleDateString() : "—" },
+                        { label: "Next Billing", value: subscription.next_billing_at ? new Date(subscription.next_billing_at).toLocaleDateString() : "—" },
+                      ].map((row) => (
+                        <div key={row.label} className="rounded-2xl bg-slate-50 border border-slate-200 p-4">
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-1">{row.label}</p>
+                          <p className="text-base font-bold text-slate-900 capitalize">{row.value}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-center py-8 text-slate-400">
+                      <CreditCard className="h-8 w-8 mx-auto mb-2 opacity-40" />
+                      <p className="text-sm font-medium">No active subscription found.</p>
+                      <p className="text-xs mt-1">Contact the platform admin to activate your plan.</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Staff Invite Link */}
+              <div className="rounded-3xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+                <div className="flex items-center gap-3 border-b border-slate-100 px-6 py-4 bg-gradient-to-r from-amber-50 to-slate-50">
+                  <div className="grid h-9 w-9 place-items-center rounded-xl bg-amber-100">
+                    <Link2 className="h-4 w-4 text-amber-600" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-slate-900">Staff Invite Link</h3>
+                    <p className="text-xs text-slate-500 font-medium">Share this link with staff members to join your workspace</p>
+                  </div>
+                </div>
+                <div className="p-6 flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+                  <code className="flex-1 text-sm font-mono text-slate-700 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 truncate">
+                    {`${window.location.origin}/staff-signup?org=${organizationId}`}
+                  </code>
+                  <Button onClick={copyInviteLink} className={`shrink-0 h-11 px-5 font-bold rounded-xl transition-all ${inviteCopied ? "bg-emerald-500 text-white" : "bg-amber-500 hover:bg-amber-600 text-white"}`}>
+                    {inviteCopied ? <><CheckCircle2 className="h-4 w-4 mr-2" /> Copied!</> : <><Copy className="h-4 w-4 mr-2" /> Copy Link</>}
+                  </Button>
+                </div>
+              </div>
+
             </TabsContent>
           </Tabs>
         )}

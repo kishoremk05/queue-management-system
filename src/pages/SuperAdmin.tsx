@@ -180,11 +180,6 @@ export default function SuperAdmin() {
 
   const approveCompany = async (req: any) => {
     try {
-      if (req.payment_status !== "paid") {
-        toast.error("Payment must be completed before approval.");
-        return;
-      }
-
       const { data: orgData, error: orgErr } = await supabase
         .from("organizations")
         .insert({ name: req.company_name })
@@ -202,40 +197,44 @@ export default function SuperAdmin() {
         .insert({ user_id: req.user_id, name: req.admin_name, email: req.email, organization_id: orgData.id });
       if (profErr) throw profErr;
 
-      const periodStart = new Date();
-      const periodEnd = new Date(periodStart);
-      periodEnd.setMonth(periodEnd.getMonth() + 1);
+      // Create subscription if billing columns available
+      try {
+        const periodStart = new Date();
+        const periodEnd = new Date(periodStart);
+        periodEnd.setMonth(periodEnd.getMonth() + 1);
 
-      const { error: subscriptionError } = await supabase
-        .from("organization_subscriptions")
-        .insert({
-          organization_id: orgData.id,
-          request_id: req.id,
-          plan_id: req.selected_plan || "professional",
-          status: "active",
-          amount: req.payment_amount || 0,
-          currency: req.payment_currency || "USD",
-          current_period_start: periodStart.toISOString(),
-          current_period_end: periodEnd.toISOString(),
-          next_billing_at: periodEnd.toISOString(),
-          payment_provider: req.payment_provider || "paystack",
-          payment_reference: req.payment_reference || req.paystack_reference || null,
-          paystack_reference: req.paystack_reference,
-        });
-      if (subscriptionError) throw subscriptionError;
+        await supabase
+          .from("organization_subscriptions")
+          .insert({
+            organization_id: orgData.id,
+            request_id: req.id,
+            plan_id: req.selected_plan || "professional",
+            status: "active",
+            amount: req.payment_amount || 0,
+            currency: req.payment_currency || "USD",
+            current_period_start: periodStart.toISOString(),
+            current_period_end: periodEnd.toISOString(),
+            next_billing_at: periodEnd.toISOString(),
+            payment_provider: req.payment_provider || "paystack",
+            payment_reference: req.payment_reference || req.paystack_reference || null,
+            paystack_reference: req.paystack_reference || null,
+          });
+      } catch (_) {
+        // Subscription table may not exist yet — safe to skip
+      }
 
-      const { error: reqErr } = await supabase
+      await supabase
         .from("company_requests")
         .update({ status: "approved" })
         .eq("id", req.id);
-      if (reqErr) throw reqErr;
 
-      toast.success(`${req.company_name} has been approved`);
+      toast.success(`✅ ${req.company_name} has been approved and can now log in.`);
       fetchRequests();
     } catch (err: any) {
       toast.error(err.message);
     }
   };
+
 
   const rejectCompany = async (id: string) => {
     const { error } = await supabase

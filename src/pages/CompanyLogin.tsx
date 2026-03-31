@@ -31,22 +31,14 @@ export default function CompanyLogin() {
         .maybeSingle();
 
       if (!roleData) {
-        const { data: latestRequest } = await supabase
-          .from("company_requests")
-          .select("status, payment_status")
-          .eq("user_id", data.user.id)
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
         await supabase.auth.signOut();
-        if (latestRequest?.payment_status && latestRequest.payment_status !== "paid") {
-          toast.error("Payment is not complete. Please finish checkout first.");
-        } else {
-          toast.error("Your account is pending approval.");
-        }
+        toast.error("Your account is pending approval.", {
+          description: "An admin will review and activate your account shortly.",
+          duration: 6000,
+        });
         return;
       }
+
 
       if (roleData.role === "company_admin") {
         navigate("/company-dashboard");
