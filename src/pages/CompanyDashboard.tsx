@@ -18,6 +18,7 @@ import {
   ClipboardList,
   Copy,
   CreditCard,
+  Crown,
   Download,
   ExternalLink,
   FileText,
@@ -194,15 +195,15 @@ export default function CompanyDashboard() {
     else { toast.success("Counter deleted"); fetchAll(); }
   };
 
-  const approveStaff = async (req: any) => {
+  const approveStaff = async (req: any, roleStr: "company_admin" | "staff" = "staff") => {
     try {
-      const { error: roleErr } = await supabase.from("user_roles").insert({ user_id: req.user_id, role: "staff", organization_id: organizationId });
+      const { error: roleErr } = await supabase.from("user_roles").insert({ user_id: req.user_id, role: roleStr, organization_id: organizationId });
       if (roleErr) throw roleErr;
       const { error: profErr } = await supabase.from("profiles").insert({ user_id: req.user_id, name: req.name, email: req.email, organization_id: organizationId });
       if (profErr) throw profErr;
       const { error } = await supabase.from("staff_requests").update({ status: "approved" }).eq("id", req.id);
       if (error) throw error;
-      toast.success("Staff approved");
+      toast.success(`User approved as ${roleStr === "company_admin" ? "Admin" : "Staff"}`);
       fetchAll();
     } catch (err: any) {
       toast.error(err.message);
@@ -583,11 +584,14 @@ export default function CompanyDashboard() {
                         <StatusBadge status={req.status} />
                         {req.status === "pending" && (
                           <div className="flex gap-2">
-                            <Button size="sm" onClick={() => approveStaff(req)} className="h-9 px-4 bg-emerald-500 hover:bg-emerald-600 text-white font-bold rounded-xl shadow-sm">
-                              <CheckCircle2 className="h-4 w-4 mr-1.5" /> Approve
+                            <Button size="sm" onClick={() => approveStaff(req, "company_admin")} className="h-9 px-3 bg-violet-600 hover:bg-violet-700 text-white font-bold rounded-lg shadow-sm">
+                              <Crown className="h-4 w-4 mr-1" /> Admin
                             </Button>
-                            <Button size="sm" onClick={() => rejectStaff(req.id)} variant="outline" className="h-9 px-4 border-red-200 text-red-600 hover:bg-red-50 hover:border-red-300 font-bold rounded-xl shadow-sm">
-                              <XCircle className="h-4 w-4 mr-1.5" /> Reject
+                            <Button size="sm" onClick={() => approveStaff(req, "staff")} className="h-9 px-3 bg-emerald-500 hover:bg-emerald-600 text-white font-bold rounded-lg shadow-sm">
+                              <CheckCircle2 className="h-4 w-4 mr-1" /> Staff
+                            </Button>
+                            <Button size="sm" onClick={() => rejectStaff(req.id)} variant="outline" className="h-9 px-3 border-red-200 text-red-600 hover:bg-red-50 hover:border-red-300 font-bold rounded-lg shadow-sm">
+                              <XCircle className="h-4 w-4 mr-1" /> Reject
                             </Button>
                           </div>
                         )}
