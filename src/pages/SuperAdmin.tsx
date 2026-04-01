@@ -11,6 +11,7 @@ import {
   CheckCircle2,
   Clock,
   CreditCard,
+  Copy,
   Edit3,
   Eye,
   EyeOff,
@@ -98,8 +99,47 @@ export default function SuperAdmin() {
       .from("company_requests")
       .select("*")
       .order("created_at", { ascending: false });
-    if (!error) setRequests(data || []);
+
+    if (!error && data) {
+      const approved = data.filter((req) => req.status === "approved" && req.user_id);
+      const approvedUserIds = Array.from(new Set(approved.map((req) => req.user_id)));
+
+      let uuidByUserId: Record<string, string> = {};
+      if (approvedUserIds.length > 0) {
+        const { data: roleRows, error: roleError } = await supabase
+          .from("user_roles")
+          .select("user_id, organization_id")
+          .eq("role", "company_admin")
+          .in("user_id", approvedUserIds);
+
+        if (!roleError && roleRows) {
+          uuidByUserId = roleRows.reduce<Record<string, string>>((acc, row) => {
+            if (row.user_id && row.organization_id) {
+              acc[row.user_id] = row.organization_id;
+            }
+            return acc;
+          }, {});
+        }
+      }
+
+      const hydrated = data.map((req) => ({
+        ...req,
+        organization_uuid: req.user_id ? uuidByUserId[req.user_id] || null : null,
+      }));
+      setRequests(hydrated);
+    } else {
+      setRequests([]);
+    }
     setLoading(false);
+  };
+
+  const copyOrganizationId = async (organizationId: string) => {
+    try {
+      await navigator.clipboard.writeText(organizationId);
+      toast.success("Company UUID copied");
+    } catch {
+      toast.error("Failed to copy UUID");
+    }
   };
 
   const fetchPricing = async () => {
@@ -594,6 +634,21 @@ export default function SuperAdmin() {
                           <p className="text-xs font-semibold text-slate-400 mt-1 uppercase tracking-wider">
                             {new Date(req.created_at).toLocaleDateString()} at {new Date(req.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                           </p>
+                          {req.status === "approved" && req.organization_uuid && (
+                            <div className="mt-2 inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5">
+                              <span className="text-[10px] font-black uppercase tracking-wider text-emerald-700">UUID</span>
+                              <code className="font-mono text-xs text-emerald-800">{req.organization_uuid}</code>
+                              <button
+                                type="button"
+                                onClick={() => copyOrganizationId(req.organization_uuid)}
+                                className="rounded-md p-1 text-emerald-700 transition-colors hover:bg-emerald-100"
+                                aria-label="Copy company UUID"
+                                title="Copy company UUID"
+                              >
+                                <Copy className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          )}
                         </div>
                       </div>
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between sm:justify-end gap-4 shrink-0 mt-2 sm:mt-0">
