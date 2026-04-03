@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { QRCodeSVG } from "qrcode.react";
+import { printTokenWithBridge, type HardwarePrintPayload } from "@/utils/hardwarePrint";
 import {
   AlertCircle,
   ArrowLeft,
@@ -38,6 +39,7 @@ export default function Kiosk() {
   const [selectedPriority, setSelectedPriority] = useState("normal");
   const [generatedToken, setGeneratedToken] = useState<any>(null);
   const [loading, setLoading] = useState(false);
+  const [printing, setPrinting] = useState(false);
   const [orgName, setOrgName] = useState("");
   const [customerName, setCustomerName] = useState("");
   const [visitReason, setVisitReason] = useState("");
@@ -148,9 +150,41 @@ export default function Kiosk() {
     }
   };
 
-  const handlePrint = () => {
-    if (!generatedToken) return;
-    window.print();
+  const getPrintPayload = (): HardwarePrintPayload | null => {
+    if (!generatedToken) return null;
+    return {
+      organizationName: orgName,
+      tokenNumber: generatedToken.token_number,
+      serviceName: generatedToken.services?.name || "Service",
+      priorityLevel: generatedToken.priority_level || "normal",
+      createdAtIso: generatedToken.created_at,
+      customerName: generatedToken.customer_name || null,
+      visitReason: generatedToken.visit_reason || null,
+      trackingUrl,
+    };
+  };
+
+  const handlePrint = async () => {
+    const payload = getPrintPayload();
+    if (!payload) return;
+
+    setPrinting(true);
+
+    try {
+      const hardwareResult = await printTokenWithBridge(payload);
+
+      if (hardwareResult.success) {
+        const printerLabel = hardwareResult.printerName || "thermal printer";
+        toast.success(`Printed on ${printerLabel}`);
+        return;
+      }
+
+      console.warn("Hardware print failed, falling back to browser print:", hardwareResult.error);
+      window.print();
+      toast.info("Printer bridge unavailable. Used browser print instead.");
+    } finally {
+      setPrinting(false);
+    }
   };
 
   const handleNewToken = () => {
@@ -429,8 +463,13 @@ export default function Kiosk() {
               </p>
               
               <div className="pt-2 lg:pt-6 flex flex-col gap-3 lg:gap-4 max-w-md mx-auto lg:mx-0">
-                <Button onClick={handlePrint} className="w-full h-12 sm:h-14 lg:h-16 bg-slate-900 text-white text-base sm:text-lg lg:text-xl font-black rounded-3xl shadow-2xl shadow-slate-900/20 hover:bg-slate-800 transition-all active:scale-[0.98]">
-                  <Printer className="h-4 w-4 sm:h-5 sm:w-5 lg:h-6 lg:w-6 mr-2" /> Print Ticket
+                <Button
+                  onClick={handlePrint}
+                  disabled={printing}
+                  className="w-full h-12 sm:h-14 lg:h-16 bg-slate-900 text-white text-base sm:text-lg lg:text-xl font-black rounded-3xl shadow-2xl shadow-slate-900/20 hover:bg-slate-800 transition-all active:scale-[0.98]"
+                >
+                  <Printer className="h-4 w-4 sm:h-5 sm:w-5 lg:h-6 lg:w-6 mr-2" />
+                  {printing ? "Printing..." : "Print Ticket"}
                 </Button>
                 <Button onClick={handleNewToken} variant="outline" className="w-full h-12 sm:h-14 lg:h-16 border-4 border-slate-200 bg-white text-slate-700 text-sm sm:text-base lg:text-lg font-bold rounded-3xl hover:bg-slate-50 hover:border-slate-300 transition-all active:scale-[0.98]">
                   Finish & Get New Token
@@ -440,7 +479,7 @@ export default function Kiosk() {
 
             {/* Right side: Digital Preview (Also used for actual thermal printing via CSS) */}
             <div className="flex-shrink-0">
-              <div id="print-ticket" className="bg-white rounded-[2rem] border-2 border-slate-100 shadow-[0_30px_60px_-15px_rgba(0,0,0,0.1)] p-10 w-[400px] relative overflow-hidden">
+              <div id="print-ticket-preview" className="bg-white rounded-[2rem] border-2 border-slate-100 shadow-[0_30px_60px_-15px_rgba(0,0,0,0.1)] p-10 w-[400px] relative overflow-hidden">
                 {/* Decorative cutouts to look like a ticket on screen */}
                 <div className="absolute -left-6 top-1/2 h-12 w-12 -translate-y-1/2 rounded-full bg-slate-50 border-r-2 border-slate-100 shadow-inner no-print" />
                 <div className="absolute -right-6 top-1/2 h-12 w-12 -translate-y-1/2 rounded-full bg-slate-50 border-l-2 border-slate-100 shadow-inner no-print" />
