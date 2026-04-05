@@ -7,13 +7,20 @@ import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { QRCodeSVG } from "qrcode.react";
 import { printTokenWithBridge, type HardwarePrintPayload } from "@/utils/hardwarePrint";
+import { startHeartbeat, stopHeartbeat } from "@/utils/deviceHealth";
+import { quickEstimate } from "@/utils/waitTimePredictor";
 import {
   AlertCircle,
   ArrowLeft,
+  Bell,
+  BellOff,
   Check,
   ChevronRight,
+  Clock,
   Crown,
   Heart,
+  MessageSquare,
+  Phone,
   Printer,
   ScanLine,
   Sparkles,
@@ -23,6 +30,7 @@ import {
 } from "lucide-react";
 
 const IDLE_TIMEOUT = 45000;
+const AD_ROTATE_INTERVAL = 6000;
 
 const priorityOptions = [
   { value: "normal", label: "Normal", icon: Users, color: "bg-blue-50 text-blue-600", activeColor: "bg-blue-600 text-white", borderColor: "border-blue-100", activeBorder: "border-blue-600", description: "Standard Queue" },
@@ -34,7 +42,7 @@ const priorityOptions = [
 export default function Kiosk() {
   const { orgId } = useParams<{ orgId: string }>();
   const [services, setServices] = useState<any[]>([]);
-  const [step, setStep] = useState<"idle" | "services" | "details" | "priority" | "ticket">("idle");
+  const [step, setStep] = useState<"idle" | "services" | "details" | "priority" | "printing" | "ticket">("idle");
   const [selectedService, setSelectedService] = useState<any>(null);
   const [selectedPriority, setSelectedPriority] = useState("normal");
   const [generatedToken, setGeneratedToken] = useState<any>(null);
@@ -42,26 +50,72 @@ export default function Kiosk() {
   const [printing, setPrinting] = useState(false);
   const [orgName, setOrgName] = useState("");
   const [customerName, setCustomerName] = useState("");
+  const [customerPhone, setCustomerPhone] = useState("");
   const [visitReason, setVisitReason] = useState("");
+  const [notifyOptIn, setNotifyOptIn] = useState(false);
+  const [notifyChannel, setNotifyChannel] = useState<"sms" | "whatsapp">("sms");
+  const [autoPrintEnabled, setAutoPrintEnabled] = useState(true);
+  const [orgSettings, setOrgSettings] = useState<any>(null);
+  const [waitingCounts, setWaitingCounts] = useState<Record<string, number>>({});
+  const [adIndex, setAdIndex] = useState(0);
+  const [printResult, setPrintResult] = useState<string>("");
   const idleTimerRef = useRef<any>(null);
+  const adTimerRef = useRef<any>(null);
 
+  // Fetch services and org info
   useEffect(() => {
     const fetchData = async () => {
       if (!orgId) return;
       const [svc, org] = await Promise.all([
         supabase.from("services").select("*").eq("organization_id", orgId),
-        supabase.from("organizations").select("name").eq("id", orgId).maybeSingle(),
+        supabase.from("organizations").select("*").eq("id", orgId).maybeSingle(),
       ]);
       setServices(svc.data || []);
-      setOrgName(org.data?.name || "Smart Queue");
+      const orgData = org.data;
+      setOrgName(orgData?.name || "Smart Queue");
+      setOrgSettings(orgData);
+      setAutoPrintEnabled(orgData?.auto_print_enabled !== false);
+
+      // Fetch waiting counts per service
+      const { data: waitingTokens } = await supabase
+        .from("tokens")
+        .select("service_id")
+        .eq("organization_id", orgId)
+        .eq("status", "waiting");
+
+      const counts: Record<string, number> = {};
+      (waitingTokens || []).forEach((t: any) => {
+        counts[t.service_id] = (counts[t.service_id] || 0) + 1;
+      });
+      setWaitingCounts(counts);
     };
     fetchData();
   }, [orgId]);
 
+  // Device heartbeat for kiosk monitoring
+  useEffect(() => {
+    if (orgId) {
+      startHeartbeat(orgId, "kiosk", `kiosk-${orgId}`, { userAgent: navigator.userAgent });
+    }
+    return () => stopHeartbeat();
+  }, [orgId]);
+
+  // Ad rotation on idle screen
+  useEffect(() => {
+    const ads: string[] = (orgSettings?.kiosk_ads as string[]) || [];
+    if (step === "idle" && ads.length > 1) {
+      adTimerRef.current = setInterval(() => {
+        setAdIndex((prev) => (prev + 1) % ads.length);
+      }, AD_ROTATE_INTERVAL);
+    }
+    return () => {
+      if (adTimerRef.current) clearInterval(adTimerRef.current);
+    };
+  }, [step, orgSettings]);
+
   const resetIdleTimer = () => {
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
     if (step === "ticket") {
-      // Shorter timeout after ticket is generated
       idleTimerRef.current = setTimeout(() => {
         handleNewToken();
       }, 15000);
@@ -83,7 +137,6 @@ export default function Kiosk() {
     try {
       let tokenNumber: string | null = null;
 
-      // Try the RPC function first
       const { data: rpcData, error: rpcError } = await supabase.rpc("generate_token_with_priority", {
         _service_id: selectedService.id,
         _org_id: orgId,
@@ -130,47 +183,67 @@ export default function Kiosk() {
         .maybeSingle();
 
       setGeneratedToken(tokenData);
-      setStep("ticket");
-      toast.success("Token generated successfully!");
 
+      // Update customer details
       if (tokenData?.id) {
         await supabase.from("tokens").update({
           customer_name: customerName || null,
-          visit_reason: visitReason || null,
+          customer_phone: customerPhone || null,
+          visit_reason: visitReason || null
         } as any).eq("id", tokenData.id);
       }
-      
-      // Auto-print option could go here if configured
-      // setTimeout(() => window.print(), 500);
+
+      // Auto-print if enabled
+      if (autoPrintEnabled) {
+        setStep("printing");
+        toast.success("Token generated! Printing ticket...");
+        
+        const payload = buildPrintPayload(tokenData, tokenNumber!);
+        const result = await printTokenWithBridge(payload);
+        
+        if (result.success) {
+          setPrintResult(`Printed on ${result.printerName || "thermal printer"}`);
+        } else {
+          setPrintResult("Auto-print unavailable. Use the button below.");
+          console.warn("Auto-print failed:", result.error);
+        }
+        setStep("ticket");
+      } else {
+        setStep("ticket");
+        toast.success("Token generated successfully!");
+      }
       
     } catch (err: any) {
       toast.error(err.message || "Failed to generate token");
+      setStep("priority");
     } finally {
       setLoading(false);
     }
   };
 
-  const getPrintPayload = (): HardwarePrintPayload | null => {
-    if (!generatedToken) return null;
+  const buildPrintPayload = (tokenData: any, tokenNumber: string): HardwarePrintPayload => {
+    const waitCount = waitingCounts[selectedService?.id] || 0;
+    const estDuration = selectedService?.estimated_duration_minutes || 5;
     return {
       organizationName: orgName,
-      tokenNumber: generatedToken.token_number,
-      serviceName: generatedToken.services?.name || "Service",
-      priorityLevel: generatedToken.priority_level || "normal",
-      createdAtIso: generatedToken.created_at,
-      customerName: generatedToken.customer_name || null,
-      visitReason: generatedToken.visit_reason || null,
-      trackingUrl,
+      tokenNumber: tokenNumber,
+      serviceName: tokenData?.services?.name || selectedService?.name || "Service",
+      priorityLevel: selectedPriority,
+      createdAtIso: tokenData?.created_at || new Date().toISOString(),
+      customerName: customerName || null,
+      customerPhone: customerPhone || null,
+      visitReason: visitReason || null,
+      trackingUrl: `${window.location.origin}/track/${orgId}/${tokenNumber}`,
+      estimatedWait: quickEstimate(waitCount + 1, estDuration),
     };
   };
 
   const handlePrint = async () => {
-    const payload = getPrintPayload();
-    if (!payload) return;
-
+    if (!generatedToken) return;
     setPrinting(true);
 
     try {
+      const payload = buildPrintPayload(generatedToken, generatedToken.token_number);
       const hardwareResult = await printTokenWithBridge(payload);
 
       if (hardwareResult.success) {
@@ -193,12 +266,18 @@ export default function Kiosk() {
     setSelectedPriority("normal");
     setGeneratedToken(null);
     setCustomerName("");
+    setCustomerPhone("");
     setVisitReason("");
+    setNotifyOptIn(false);
+    setPrintResult("");
   };
 
   const trackingUrl = generatedToken
     ? `${window.location.origin}/track/${orgId}/${generatedToken.token_number}`
     : "";
+
+  const idleMessage = orgSettings?.kiosk_idle_message || "Welcome! Tap to get started";
+  const kioskAds: string[] = (orgSettings?.kiosk_ads as string[]) || [];
 
   // ─── Idle Screen ───
   if (step === "idle") {
@@ -207,7 +286,6 @@ export default function Kiosk() {
         className="flex min-h-[100dvh] flex-col items-center justify-center bg-white text-slate-900 cursor-pointer overflow-hidden relative"
         onClick={() => setStep("services")}
       >
-        {/* Massive animated gradient background */}
         <div className="absolute inset-x-0 -top-[30%] -bottom-[30%] bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-violet-100 via-white to-white blur-2xl opacity-80 animate-pulse-slow pointer-events-none" />
         
         <div className="relative z-10 text-center animate-fade-up space-y-8 px-6 flex flex-col items-center max-w-2xl mx-auto">
@@ -221,9 +299,47 @@ export default function Kiosk() {
             <h2 className="text-lg sm:text-2xl text-slate-500 font-bold tracking-[0.3em] uppercase">Welcome To</h2>
             <h1 className="text-4xl sm:text-6xl font-black font-display tracking-tighter text-slate-900 drop-shadow-sm leading-[0.95]">{orgName}</h1>
           </div>
+
+          {/* Rotating idle messages / ads */}
+          {kioskAds.length > 0 ? (
+            <div className="min-h-[3rem] flex items-center justify-center transition-opacity duration-700">
+              <p className="text-sm sm:text-lg text-slate-500 font-medium text-center max-w-lg animate-fade-up" key={adIndex}>
+                {kioskAds[adIndex]}
+              </p>
+            </div>
+          ) : (
+            <p className="text-sm sm:text-lg text-slate-500 font-medium">{idleMessage}</p>
+          )}
+
           <div className="flex items-center justify-center gap-3 text-lg sm:text-2xl text-white font-bold bg-violet-600 px-8 sm:px-10 py-4 sm:py-5 rounded-[2rem] sm:rounded-[2.5rem] shadow-xl shadow-violet-600/30 mx-auto w-fit animate-pulse-once hover:scale-105 transition-transform cursor-pointer">
             Tap screen to start
             <ChevronRight className="h-6 w-6 sm:h-7 sm:w-7" />
+          </div>
+
+          {/* Mobile join QR hint */}
+          <div className="flex items-center gap-3 text-sm text-slate-400 font-medium mt-4">
+            <Phone className="h-4 w-4" />
+            <span>Or scan QR code to join from your phone</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ─── Printing Overlay ───
+  if (step === "printing") {
+    return (
+      <div className="flex min-h-[100dvh] flex-col items-center justify-center bg-white text-slate-900">
+        <div className="text-center space-y-8 animate-fade-up">
+          <div className="mx-auto grid h-24 w-24 place-items-center rounded-full bg-violet-50 border-8 border-violet-100 animate-pulse">
+            <Printer className="h-12 w-12 text-violet-600" />
+          </div>
+          <div>
+            <h2 className="text-3xl sm:text-4xl font-black font-display text-slate-900 mb-3">Printing Your Ticket...</h2>
+            <p className="text-lg text-slate-500 font-medium">Please wait while we print your queue ticket</p>
+          </div>
+          <div className="h-2 w-48 mx-auto bg-slate-100 rounded-full overflow-hidden">
+            <div className="h-full bg-gradient-to-r from-violet-600 to-blue-600 rounded-full animate-progress" />
           </div>
         </div>
       </div>
@@ -237,7 +353,7 @@ export default function Kiosk() {
         <div className="absolute inset-x-0 top-0 h-[600px] bg-gradient-to-br from-violet-50 via-blue-50/30 to-transparent blur-3xl opacity-80" />
       </div>
 
-      {/* Massive Header for Touchscreens */}
+      {/* Header */}
       <header className="kiosk-screen border-b-2 border-slate-100 bg-white/95 backdrop-blur-xl sticky top-0 z-40 px-4 py-3 sm:px-6 lg:px-10 lg:py-4">
         <div className="mx-auto flex w-full items-center justify-between">
           <div className="flex items-center gap-3 sm:gap-4">
@@ -251,10 +367,10 @@ export default function Kiosk() {
           </div>
           
           <div className="flex items-center gap-4">
-            {step === "priority" && (
+            {(step === "priority" || step === "details") && (
               <Button 
                 variant="outline" 
-                onClick={() => setStep("services")} 
+                onClick={() => setStep(step === "details" ? "services" : "details")} 
                 className="h-11 sm:h-12 lg:h-14 px-4 sm:px-5 lg:px-7 text-sm sm:text-base lg:text-lg border-2 border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300 rounded-2xl font-bold"
               >
                 <ArrowLeft className="h-4 w-4 sm:h-5 sm:w-5 mr-2" /> Go Back
@@ -272,11 +388,12 @@ export default function Kiosk() {
       </header>
 
       <main className="kiosk-screen flex-1 flex flex-col w-full px-4 sm:px-6 lg:px-10 py-6 lg:py-10">
-        {/* Massive Step indicator */}
+        {/* Step indicator */}
         <div className="mb-6 lg:mb-10">
           <div className="flex items-center justify-center gap-2 md:gap-3 lg:gap-6 max-w-5xl mx-auto flex-wrap lg:flex-nowrap">
-            {["Select Service", "Priority Level", "Your Ticket"].map((label, idx) => {
-              const currentIdx = step === "services" ? 0 : step === "priority" ? 1 : 2;
+            {["Select Service", "Your Details", "Priority Level", "Your Ticket"].map((label, idx) => {
+              const stepMap: Record<string, number> = { services: 0, details: 1, priority: 2, ticket: 3 };
+              const currentIdx = stepMap[step] ?? 3;
               const isPast = idx < currentIdx;
               const isCurrent = idx === currentIdx;
               
@@ -312,26 +429,44 @@ export default function Kiosk() {
             </div>
             
             <div className="grid gap-3 sm:gap-4 lg:gap-5 md:grid-cols-2 xl:grid-cols-3 auto-rows-fr">
-              {services.map((service) => (
-                <button
-                  key={service.id}
-                  onClick={() => { setSelectedService(service); setStep("details"); }}
-                  className="group relative flex flex-col items-center justify-center text-center rounded-[1.5rem] sm:rounded-[2rem] border-4 border-slate-100 bg-white p-5 sm:p-6 lg:p-8 transition-all hover:border-violet-500 hover:shadow-2xl hover:shadow-violet-500/20 active:scale-[0.98] min-h-[180px] sm:min-h-[220px]"
-                >
-                  <div className="grid h-16 w-16 sm:h-20 sm:w-20 lg:h-28 lg:w-28 place-items-center rounded-full bg-slate-50 text-2xl sm:text-3xl lg:text-5xl font-black text-violet-600 font-mono mb-4 sm:mb-5 lg:mb-7 group-hover:bg-violet-50 transition-colors group-hover:scale-110 duration-300">
-                    {service.prefix}
-                  </div>
-                  <h3 className="text-lg sm:text-xl lg:text-2xl font-black text-slate-900 mb-2 group-hover:text-violet-700 transition-colors line-clamp-2">{service.name}</h3>
-                  {service.show_price_on_kiosk !== false && service.price > 0 && (
-                    <div className="mt-1 mb-2 inline-flex items-center justify-center px-4 py-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100">
-                      <span className="font-bold text-sm sm:text-base tracking-wide flex items-center gap-1">
-                        {service.price_currency || "USD"} {(service.price / 100).toFixed(2)}
-                      </span>
+              {services.map((service) => {
+                const waitCount = waitingCounts[service.id] || 0;
+                const estWait = quickEstimate(waitCount, service.estimated_duration_minutes || 5);
+                return (
+                  <button
+                    key={service.id}
+                    onClick={() => { setSelectedService(service); setStep("details"); }}
+                    className="group relative flex flex-col items-center justify-center text-center rounded-[1.5rem] sm:rounded-[2rem] border-4 border-slate-100 bg-white p-5 sm:p-6 lg:p-8 transition-all hover:border-violet-500 hover:shadow-2xl hover:shadow-violet-500/20 active:scale-[0.98] min-h-[180px] sm:min-h-[220px]"
+                  >
+                    <div className="grid h-16 w-16 sm:h-20 sm:w-20 lg:h-28 lg:w-28 place-items-center rounded-full bg-slate-50 text-2xl sm:text-3xl lg:text-5xl font-black text-violet-600 font-mono mb-4 sm:mb-5 lg:mb-7 group-hover:bg-violet-50 transition-colors group-hover:scale-110 duration-300">
+                      {service.prefix}
                     </div>
-                  )}
-                  <p className="text-[10px] sm:text-xs lg:text-sm font-bold text-slate-400 mt-auto uppercase tracking-widest group-hover:text-violet-500">Tap to select</p>
-                </button>
-              ))}
+                    <h3 className="text-lg sm:text-xl lg:text-2xl font-black text-slate-900 mb-2 group-hover:text-violet-700 transition-colors line-clamp-2">{service.name}</h3>
+                    {service.description && (
+                      <p className="text-xs sm:text-sm text-slate-400 font-medium mb-2 line-clamp-1">{service.description}</p>
+                    )}
+                    {service.show_price_on_kiosk !== false && service.price > 0 && (
+                      <div className="mt-1 mb-2 inline-flex items-center justify-center px-4 py-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100">
+                        <span className="font-bold text-sm sm:text-base tracking-wide flex items-center gap-1">
+                          {service.price_currency || "USD"} {(service.price / 100).toFixed(2)}
+                        </span>
+                      </div>
+                    )}
+                    {/* Waiting count & estimated wait */}
+                    <div className="flex items-center gap-3 mt-2">
+                      <span className="inline-flex items-center gap-1 text-xs font-bold text-slate-400">
+                        <Users className="h-3 w-3" /> {waitCount} waiting
+                      </span>
+                      {waitCount > 0 && (
+                        <span className="inline-flex items-center gap-1 text-xs font-bold text-violet-500">
+                          <Clock className="h-3 w-3" /> ~{estWait}min
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[10px] sm:text-xs lg:text-sm font-bold text-slate-400 mt-auto uppercase tracking-widest group-hover:text-violet-500">Tap to select</p>
+                  </button>
+                );
+              })}
               {services.length === 0 && (
                 <div className="col-span-full text-center py-10 sm:py-14 lg:py-16 bg-white rounded-[2rem] sm:rounded-[2.5rem] border-4 border-slate-200 border-dashed">
                   <AlertCircle className="h-10 w-10 sm:h-12 sm:w-12 lg:h-16 lg:w-16 text-slate-300 mx-auto mb-4" />
@@ -358,15 +493,25 @@ export default function Kiosk() {
                 </div>
 
                 <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-2">Phone number (optional)</p>
+                  <div className="relative">
+                    <Phone className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-slate-400" />
+                    <Input value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} placeholder="+1 555 000 0000" className="h-14 rounded-2xl border-slate-200 bg-slate-50 text-base font-medium pl-12" />
+                  </div>
+                </div>
+
+                <div>
                   <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-2">Reason for visit</p>
-                  <Textarea value={visitReason} onChange={(e) => setVisitReason(e.target.value)} placeholder="Tell us what you need help with" className="min-h-[140px] rounded-2xl border-slate-200 bg-slate-50 text-base font-medium resize-none" />
+                  <Textarea value={visitReason} onChange={(e) => setVisitReason(e.target.value)} placeholder="Tell us what you need help with" className="min-h-[100px] rounded-2xl border-slate-200 bg-slate-50 text-base font-medium resize-none" />
                 </div>
               </div>
 
               <div className="rounded-[2rem] border-4 border-slate-100 bg-white p-5 sm:p-6 lg:p-8 flex flex-col justify-between gap-5">
-                <div className="rounded-2xl bg-slate-50 border border-slate-200 p-4 text-sm text-slate-500 leading-relaxed">
-                  <p className="font-bold text-slate-700 mb-1">Optional details</p>
-                  <p>Your name and visit reason help staff prepare before calling your token.</p>
+                <div className="space-y-4">
+                  <div className="rounded-2xl bg-slate-50 border border-slate-200 p-4 text-sm text-slate-500 leading-relaxed">
+                    <p className="font-bold text-slate-700 mb-1">Optional details</p>
+                    <p>Your name and visit reason help staff prepare before calling your token.</p>
+                  </div>
                 </div>
 
                 <div className="flex flex-col sm:flex-row gap-3">
@@ -450,7 +595,7 @@ export default function Kiosk() {
         {step === "ticket" && generatedToken && (
           <div className="animate-scale-in max-w-5xl mx-auto w-full flex flex-col lg:flex-row items-center justify-center gap-8 lg:gap-12">
             
-            {/* Left side: Success Message & Actions for Touchscreen */}
+            {/* Left side: Success Message & Actions */}
             <div className="flex-1 text-center lg:text-left space-y-5 lg:space-y-6">
               <div className="inline-grid h-14 w-14 sm:h-16 sm:w-16 lg:h-20 lg:w-20 place-items-center rounded-full bg-emerald-100 mb-4 border-8 border-emerald-50">
                 <Check className="h-6 w-6 sm:h-7 sm:w-7 lg:h-9 lg:w-9 text-emerald-600" />
@@ -458,8 +603,22 @@ export default function Kiosk() {
               <h2 className="text-3xl sm:text-4xl lg:text-6xl font-black font-display text-slate-900 tracking-tight leading-none">
                 You're in line!
               </h2>
+              
+              {/* Print result message */}
+              {printResult && (
+                <div className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-bold ${
+                  printResult.includes("Printed") ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-amber-50 text-amber-700 border border-amber-200"
+                }`}>
+                  <Printer className="h-4 w-4" />
+                  {printResult}
+                </div>
+              )}
+
               <p className="text-sm sm:text-base lg:text-xl font-medium text-slate-500 max-w-lg mx-auto lg:mx-0 leading-relaxed">
-                Please take your printed ticket or scan the QR code to track your status on your phone.
+                {autoPrintEnabled
+                  ? "Your ticket has been printed. Scan the QR code to track your status on your phone."
+                  : "Please take your printed ticket or scan the QR code to track your status on your phone."
+                }
               </p>
               
               <div className="pt-2 lg:pt-6 flex flex-col gap-3 lg:gap-4 max-w-md mx-auto lg:mx-0">
@@ -469,7 +628,7 @@ export default function Kiosk() {
                   className="w-full h-12 sm:h-14 lg:h-16 bg-slate-900 text-white text-base sm:text-lg lg:text-xl font-black rounded-3xl shadow-2xl shadow-slate-900/20 hover:bg-slate-800 transition-all active:scale-[0.98]"
                 >
                   <Printer className="h-4 w-4 sm:h-5 sm:w-5 lg:h-6 lg:w-6 mr-2" />
-                  {printing ? "Printing..." : "Print Ticket"}
+                  {printing ? "Printing..." : "Print Ticket Again"}
                 </Button>
                 <Button onClick={handleNewToken} variant="outline" className="w-full h-12 sm:h-14 lg:h-16 border-4 border-slate-200 bg-white text-slate-700 text-sm sm:text-base lg:text-lg font-bold rounded-3xl hover:bg-slate-50 hover:border-slate-300 transition-all active:scale-[0.98]">
                   Finish & Get New Token
@@ -477,13 +636,11 @@ export default function Kiosk() {
               </div>
             </div>
 
-            {/* Right side: Digital Preview (Also used for actual thermal printing via CSS) */}
+            {/* Right side: Ticket Preview */}
             <div className="flex-shrink-0">
               <div id="print-ticket-preview" className="bg-white rounded-[2rem] border-2 border-slate-100 shadow-[0_30px_60px_-15px_rgba(0,0,0,0.1)] p-10 w-[400px] relative overflow-hidden">
-                {/* Decorative cutouts to look like a ticket on screen */}
                 <div className="absolute -left-6 top-1/2 h-12 w-12 -translate-y-1/2 rounded-full bg-slate-50 border-r-2 border-slate-100 shadow-inner no-print" />
                 <div className="absolute -right-6 top-1/2 h-12 w-12 -translate-y-1/2 rounded-full bg-slate-50 border-l-2 border-slate-100 shadow-inner no-print" />
-                <div className="absolute top-0 left-0 right-0 h-4 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyMCIgaGVpZ2h0PSIxMCI+PHBhdGggZD0iTTEwIDEwQzEwIDQuNSA1LjUgMCAwIDB2MTBoMjBWMEMxNC41IDAgMTAgNC41IDEwIDEwekIgZmlsbD0iI2Y4ZmFmYyIvPjwvc3ZnPg==')] bg-repeat-x no-print opacity-50" />
 
                 <div className="print-header text-center border-b-4 border-dashed border-slate-200 pb-6 mb-8 mt-2">
                   <p className="text-sm font-bold text-slate-500 uppercase tracking-widest print:text-black">Welcome to</p>
@@ -502,20 +659,20 @@ export default function Kiosk() {
                     <span className="print-label font-bold text-slate-500 print:text-black">Service</span>
                     <span className="print-value font-black text-slate-900 break-words print:text-black">{generatedToken.services?.name}</span>
                   </div>
-                  {generatedToken.customer_name && (
+                  {customerName && (
                     <div className="print-row flex justify-between items-center text-lg">
                       <span className="print-label font-bold text-slate-500 print:text-black">Name</span>
-                      <span className="print-value font-black text-slate-900 break-words print:text-black">{generatedToken.customer_name}</span>
+                      <span className="print-value font-black text-slate-900 break-words print:text-black">{customerName}</span>
                     </div>
                   )}
                   <div className="print-row flex justify-between items-center text-lg">
                     <span className="print-label font-bold text-slate-500 print:text-black">Priority</span>
                     <span className="print-value font-black text-slate-900 capitalize print:text-black">{generatedToken.priority_level || "Normal"}</span>
                   </div>
-                  {generatedToken.visit_reason && (
+                  {visitReason && (
                     <div className="print-reason pt-2">
                       <p className="font-bold text-slate-500 text-sm uppercase tracking-widest print:text-black">Reason</p>
-                      <p className="mt-2 text-base font-medium text-slate-800 print:text-black">{generatedToken.visit_reason}</p>
+                      <p className="mt-2 text-base font-medium text-slate-800 print:text-black">{visitReason}</p>
                     </div>
                   )}
                   <div className="print-row print-meta-row flex justify-between items-center text-sm pt-4 border-t-2 border-slate-100">
@@ -546,24 +703,19 @@ export default function Kiosk() {
         )}
       </main>
 
+      {/* Hidden print-only ticket */}
       {step === "ticket" && generatedToken && (
         <div id="print-ticket" className="print-only mx-auto bg-white rounded-[2rem] border-2 border-slate-100 shadow-[0_30px_60px_-15px_rgba(0,0,0,0.1)] p-10 w-[400px] relative overflow-hidden">
-          <div className="absolute -left-6 top-1/2 h-12 w-12 -translate-y-1/2 rounded-full bg-slate-50 border-r-2 border-slate-100 shadow-inner no-print" />
-          <div className="absolute -right-6 top-1/2 h-12 w-12 -translate-y-1/2 rounded-full bg-slate-50 border-l-2 border-slate-100 shadow-inner no-print" />
-          <div className="absolute top-0 left-0 right-0 h-4 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyMCIgaGVpZ2h0PSIxMCI+PHBhdGggZD0iTTEwIDEwQzEwIDQuNSA1LjUgMCAwIDB2MTBoMjBWMEMxNC41IDAgMTAgNC41IDEwIDEwekIgZmlsbD0iI2Y4ZmFmYyIvPjwvc3ZnPg==')] bg-repeat-x opacity-50 no-print" />
-
           <div className="print-header text-center border-b-4 border-dashed border-slate-200 pb-6 mb-8 mt-2">
             <p className="text-sm font-bold text-slate-500 uppercase tracking-widest">Welcome to</p>
             <h2 className="text-3xl font-black text-slate-900 mt-2">{orgName}</h2>
           </div>
-
           <div className="print-token text-center py-6">
             <p className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-4">Your Token Number</p>
             <p className="text-[7rem] leading-none font-black text-slate-900 tracking-tighter font-display">
               {generatedToken.token_number}
             </p>
           </div>
-
           <div className="print-details space-y-4 mb-8 mt-6">
             <div className="print-row flex justify-between items-center text-lg">
               <span className="print-label font-bold text-slate-500">Service</span>
@@ -578,7 +730,6 @@ export default function Kiosk() {
               <span className="print-value font-bold text-slate-500">{new Date(generatedToken.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
             </div>
           </div>
-
           {trackingUrl && (
             <div className="print-qr flex flex-col items-center gap-4 pt-8 border-t-4 border-dashed border-slate-200">
               <div className="p-4 bg-white rounded-2xl border-2 border-slate-200 shadow-sm">

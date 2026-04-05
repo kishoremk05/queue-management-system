@@ -17,6 +17,7 @@ import Kiosk from "./pages/Kiosk";
 import Display from "./pages/Display";
 import TokenTracker from "./pages/TokenTracker";
 import PaymentCallback from "./pages/PaymentCallback";
+import MobileJoin from "./pages/MobileJoin";
 
 const queryClient = new QueryClient();
 
@@ -59,6 +60,7 @@ const App = () => (
             />
             <Route path="/kiosk/:orgId" element={<Kiosk />} />
             <Route path="/display/:orgId" element={<Display />} />
+            <Route path="/join/:orgId" element={<MobileJoin />} />
             <Route
               path="/track/:orgId/:tokenNumber"
               element={<TokenTracker />}

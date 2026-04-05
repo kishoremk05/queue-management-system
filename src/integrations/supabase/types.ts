@@ -14,65 +14,116 @@ export type Database = {
   }
   public: {
     Tables: {
-      company_requests: {
+      activity_logs: {
         Row: {
-          admin_name: string
-          company_name: string
-          created_at: string | null
-          email: string
           id: string
-          paid_at: string | null
-          payment_amount: number
-          payment_currency: string
-          payment_metadata: Json
-          payment_provider: string
-          payment_reference: string | null
-          payment_status: string
-          paystack_reference: string | null
-          selected_currency: string
-          selected_plan: string
-          status: string
+          organization_id: string
           user_id: string | null
+          action: string
+          entity_type: string
+          entity_id: string | null
+          details: Json
+          created_at: string
         }
         Insert: {
-          admin_name: string
-          company_name: string
-          created_at?: string | null
-          email: string
           id?: string
-          paid_at?: string | null
-          payment_amount?: number
-          payment_currency?: string
-          payment_metadata?: Json
-          payment_provider?: string
-          payment_reference?: string | null
-          payment_status?: string
-          paystack_reference?: string | null
-          selected_currency?: string
-          selected_plan?: string
-          status?: string
+          organization_id: string
           user_id?: string | null
+          action: string
+          entity_type: string
+          entity_id?: string | null
+          details?: Json
+          created_at?: string
         }
         Update: {
-          admin_name?: string
-          company_name?: string
-          created_at?: string | null
-          email?: string
           id?: string
-          paid_at?: string | null
-          payment_amount?: number
-          payment_currency?: string
-          payment_metadata?: Json
-          payment_provider?: string
-          payment_reference?: string | null
-          payment_status?: string
-          paystack_reference?: string | null
-          selected_currency?: string
-          selected_plan?: string
-          status?: string
+          organization_id?: string
           user_id?: string | null
+          action?: string
+          entity_type?: string
+          entity_id?: string | null
+          details?: Json
+          created_at?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "activity_logs_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      appointments: {
+        Row: {
+          id: string
+          organization_id: string
+          service_id: string
+          customer_name: string
+          customer_phone: string | null
+          customer_email: string | null
+          appointment_date: string
+          appointment_time: string
+          status: string
+          notes: string | null
+          token_id: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          organization_id: string
+          service_id: string
+          customer_name: string
+          customer_phone?: string | null
+          customer_email?: string | null
+          appointment_date: string
+          appointment_time: string
+          status?: string
+          notes?: string | null
+          token_id?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          organization_id?: string
+          service_id?: string
+          customer_name?: string
+          customer_phone?: string | null
+          customer_email?: string | null
+          appointment_date?: string
+          appointment_time?: string
+          status?: string
+          notes?: string | null
+          token_id?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "appointments_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "appointments_service_id_fkey"
+            columns: ["service_id"]
+            isOneToOne: false
+            referencedRelation: "services"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "appointments_token_id_fkey"
+            columns: ["token_id"]
+            isOneToOne: false
+            referencedRelation: "tokens"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       billing_plan_prices: {
         Row: {
@@ -160,6 +211,66 @@ export type Database = {
         }
         Relationships: []
       }
+      company_requests: {
+        Row: {
+          admin_name: string
+          company_name: string
+          created_at: string | null
+          email: string
+          id: string
+          paid_at: string | null
+          payment_amount: number
+          payment_currency: string
+          payment_metadata: Json
+          payment_provider: string
+          payment_reference: string | null
+          payment_status: string
+          paystack_reference: string | null
+          selected_currency: string
+          selected_plan: string
+          status: string
+          user_id: string | null
+        }
+        Insert: {
+          admin_name: string
+          company_name: string
+          created_at?: string | null
+          email: string
+          id?: string
+          paid_at?: string | null
+          payment_amount?: number
+          payment_currency?: string
+          payment_metadata?: Json
+          payment_provider?: string
+          payment_reference?: string | null
+          payment_status?: string
+          paystack_reference?: string | null
+          selected_currency?: string
+          selected_plan?: string
+          status?: string
+          user_id?: string | null
+        }
+        Update: {
+          admin_name?: string
+          company_name?: string
+          created_at?: string | null
+          email?: string
+          id?: string
+          paid_at?: string | null
+          payment_amount?: number
+          payment_currency?: string
+          payment_metadata?: Json
+          payment_provider?: string
+          payment_reference?: string | null
+          payment_status?: string
+          paystack_reference?: string | null
+          selected_currency?: string
+          selected_plan?: string
+          status?: string
+          user_id?: string | null
+        }
+        Relationships: []
+      }
       counters: {
         Row: {
           counter_number: number
@@ -199,21 +310,113 @@ export type Database = {
           },
         ]
       }
+      device_health: {
+        Row: {
+          id: string
+          organization_id: string
+          device_type: string
+          device_name: string | null
+          status: string
+          last_heartbeat: string
+          metadata: Json
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          organization_id: string
+          device_type: string
+          device_name?: string | null
+          status?: string
+          last_heartbeat?: string
+          metadata?: Json
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          organization_id?: string
+          device_type?: string
+          device_name?: string | null
+          status?: string
+          last_heartbeat?: string
+          metadata?: Json
+          created_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "device_health_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       organizations: {
         Row: {
           created_at: string | null
           id: string
           name: string
+          contact_email: string | null
+          contact_phone: string | null
+          timezone: string
+          default_currency: string
+          logo_url: string | null
+          primary_color: string
+          website_url: string | null
+          address: string | null
+          kiosk_idle_message: string
+          kiosk_ads: Json
+          auto_print_enabled: boolean
+          display_ads: Json
+          sms_enabled: boolean
+          whatsapp_enabled: boolean
+          notification_before_turns: number
+          avg_service_time_minutes: number
+          updated_at: string | null
         }
         Insert: {
           created_at?: string | null
           id?: string
           name: string
+          contact_email?: string | null
+          contact_phone?: string | null
+          timezone?: string
+          default_currency?: string
+          logo_url?: string | null
+          primary_color?: string
+          website_url?: string | null
+          address?: string | null
+          kiosk_idle_message?: string
+          kiosk_ads?: Json
+          auto_print_enabled?: boolean
+          display_ads?: Json
+          sms_enabled?: boolean
+          whatsapp_enabled?: boolean
+          notification_before_turns?: number
+          avg_service_time_minutes?: number
+          updated_at?: string | null
         }
         Update: {
           created_at?: string | null
           id?: string
           name?: string
+          contact_email?: string | null
+          contact_phone?: string | null
+          timezone?: string
+          default_currency?: string
+          logo_url?: string | null
+          primary_color?: string
+          website_url?: string | null
+          address?: string | null
+          kiosk_idle_message?: string
+          kiosk_ads?: Json
+          auto_print_enabled?: boolean
+          display_ads?: Json
+          sms_enabled?: boolean
+          whatsapp_enabled?: boolean
+          notification_before_turns?: number
+          avg_service_time_minutes?: number
+          updated_at?: string | null
         }
         Relationships: []
       }
@@ -477,6 +680,11 @@ export type Database = {
           name: string
           organization_id: string
           prefix: string
+          price: number
+          price_currency: string
+          show_price_on_kiosk: boolean
+          estimated_duration_minutes: number
+          description: string | null
         }
         Insert: {
           created_at?: string | null
@@ -484,6 +692,11 @@ export type Database = {
           name: string
           organization_id: string
           prefix?: string
+          price?: number
+          price_currency?: string
+          show_price_on_kiosk?: boolean
+          estimated_duration_minutes?: number
+          description?: string | null
         }
         Update: {
           created_at?: string | null
@@ -491,6 +704,11 @@ export type Database = {
           name?: string
           organization_id?: string
           prefix?: string
+          price?: number
+          price_currency?: string
+          show_price_on_kiosk?: boolean
+          estimated_duration_minutes?: number
+          description?: string | null
         }
         Relationships: [
           {
@@ -556,6 +774,11 @@ export type Database = {
           visit_reason: string | null
           status: string
           token_number: string
+          staff_notes: string | null
+          served_at: string | null
+          completed_at: string | null
+          actual_wait_minutes: number | null
+          notification_sent: boolean
         }
         Insert: {
           counter_id?: string | null
@@ -572,6 +795,11 @@ export type Database = {
           visit_reason?: string | null
           status?: string
           token_number: string
+          staff_notes?: string | null
+          served_at?: string | null
+          completed_at?: string | null
+          actual_wait_minutes?: number | null
+          notification_sent?: boolean
         }
         Update: {
           counter_id?: string | null
@@ -588,6 +816,11 @@ export type Database = {
           visit_reason?: string | null
           status?: string
           token_number?: string
+          staff_notes?: string | null
+          served_at?: string | null
+          completed_at?: string | null
+          actual_wait_minutes?: number | null
+          notification_sent?: boolean
         }
         Relationships: [
           {

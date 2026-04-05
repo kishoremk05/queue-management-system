@@ -1,377 +1,325 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
-import { announceMessage, announceNextInQueue, announceToken, playChime, unlockAudio } from "@/utils/tts";
+import { announceMessage, unlockAudio } from "@/utils/tts";
+import { startHeartbeat, stopHeartbeat } from "@/utils/deviceHealth";
 import {
+  ArrowRight,
+  Bell,
+  Clock,
+  Expand,
+  Hash,
+  Maximize2,
   Monitor,
-  BadgeInfo,
+  Users,
   Volume2,
   VolumeX,
+  Zap,
 } from "lucide-react";
+
+const AD_ROTATE_INTERVAL = 8000;
 
 export default function Display() {
   const { orgId } = useParams<{ orgId: string }>();
   const [tokens, setTokens] = useState<any[]>([]);
+  const [services, setServices] = useState<any[]>([]);
   const [counters, setCounters] = useState<any[]>([]);
-  const [orgName, setOrgName] = useState("Smart Queue");
-  const [audioEnabled, setAudioEnabled] = useState(true);
-  const [hasStarted, setHasStarted] = useState(false);
-  const [lastAnnouncedToken, setLastAnnouncedToken] = useState<string>("");
-  const [currentTime, setCurrentTime] = useState(new Date());
-  const [animatingToken, setAnimatingToken] = useState<string>("");
+  const [orgSettings, setOrgSettings] = useState<any>(null);
+  const [announcedIds, setAnnouncedIds] = useState<Set<string>>(new Set());
+  const [currentCallToken, setCurrentCallToken] = useState<any>(null);
+  const [muted, setMuted] = useState(false);
+  const [adIndex, setAdIndex] = useState(0);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  const containerRef = useRef<HTMLDivElement>(null);
+  const announcedRef = useRef(announcedIds);
 
-  // Clock timer
+  useEffect(() => { announcedRef.current = announcedIds; }, [announcedIds]);
+
+  // Time ticker
   useEffect(() => {
-    const interval = setInterval(() => setCurrentTime(new Date()), 1000);
-    return () => clearInterval(interval);
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
   }, []);
 
-  const fetchData = useCallback(async () => {
-    if (!orgId) return;
-    const [tkn, ctr, org] = await Promise.all([
-      supabase.from("tokens").select("*, services(name, prefix), counters(counter_number)").eq("organization_id", orgId).in("status", ["serving", "waiting"]).order("created_at", { ascending: true }),
-      supabase.from("counters").select("*, services(name)").eq("organization_id", orgId),
-      supabase.from("organizations").select("name").eq("id", orgId).maybeSingle(),
-    ]);
-    setTokens(tkn.data || []);
-    setCounters(ctr.data || []);
-    setOrgName(org.data?.name || "Smart Queue");
+  // Rotate ads
+  useEffect(() => {
+    const ads: string[] = (orgSettings?.display_ads as string[]) || [];
+    if (ads.length > 1) {
+      const t = setInterval(() => setAdIndex((p) => (p + 1) % ads.length), AD_ROTATE_INTERVAL);
+      return () => clearInterval(t);
+    }
+  }, [orgSettings]);
+
+  // Device heartbeat
+  useEffect(() => {
+    if (orgId) {
+      startHeartbeat(orgId, "display", `display-${orgId}`);
+    }
+    return () => stopHeartbeat();
   }, [orgId]);
 
-  useEffect(() => {
-    if (!hasStarted) return;
-    if (!("speechSynthesis" in window)) return;
-    const handleVoices = () => {
-      window.speechSynthesis.getVoices();
-    };
-    window.speechSynthesis.onvoiceschanged = handleVoices;
-    handleVoices();
-    return () => {
-      window.speechSynthesis.onvoiceschanged = null;
-    };
-  }, [hasStarted]);
-
-  useEffect(() => { fetchData(); }, [fetchData]);
-
-  // Real-time subscription with audio
-  useEffect(() => {
-    if (!orgId) return;
-    const channel = supabase
-      .channel("display-tokens")
-      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "tokens", filter: `organization_id=eq.${orgId}` }, async (payload) => {
-        const updatedToken = payload.new as any;
-        if (updatedToken.status === "serving" && updatedToken.token_number !== lastAnnouncedToken) {
-          const { data: counter } = updatedToken.counter_id
-            ? await supabase.from("counters").select("counter_number").eq("id", updatedToken.counter_id).maybeSingle()
-            : { data: null };
-
-          if (audioEnabled) {
-            playChime();
-            setTimeout(() => {
-              announceToken(updatedToken.token_number, counter?.counter_number);
-            }, 1000);
-          }
-          setLastAnnouncedToken(updatedToken.token_number);
-          setAnimatingToken(updatedToken.token_number);
-          setTimeout(() => setAnimatingToken(""), 3000);
-        }
-        fetchData();
-      })
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "tokens", filter: `organization_id=eq.${orgId}` }, () => fetchData())
-      .subscribe();
-
-    return () => { supabase.removeChannel(channel); };
-  }, [orgId, audioEnabled, lastAnnouncedToken, fetchData]);
-
-  const servingTokens = tokens.filter((t) => t.status === "serving");
-  const waitingTokens = tokens.filter((t) => t.status === "waiting");
-  const currentServingToken = servingTokens[0] ?? null;
-  const nextWaitingToken = waitingTokens[0] ?? null;
-  const nextWaitingPosition = nextWaitingToken ? waitingTokens.findIndex((token) => token.id === nextWaitingToken.id) + 1 : null;
-  const currentServingCounter = currentServingToken
-    ? counters.find((counter) => counter.id === currentServingToken.counter_id)
-    : null;
-  const previewToken = currentServingToken ?? nextWaitingToken;
-  const previewTitle = currentServingToken ? "Current Call" : "Next in Queue";
-  const previewBadge = currentServingToken
-    ? currentServingToken.priority_level
-    : nextWaitingToken
-      ? "waiting"
-      : "waiting";
-
-  // Organize by counter
-  const counterMap = new Map<number, any>();
-  counters.forEach((c) => {
-    const serving = servingTokens.find((t) => t.counter_id === c.id);
-    counterMap.set(c.counter_number, {
-      counter: c,
-      token: serving,
-    });
-  });
-
-  const handleStartDisplay = () => {
-    unlockAudio();
-    setHasStarted(true);
-  };
-
-  const handleTestAudio = () => {
-    unlockAudio();
-    if (audioEnabled) {
-      playChime();
-      setTimeout(() => {
-        if (nextWaitingToken) {
-          announceNextInQueue(nextWaitingToken.token_number, nextWaitingPosition ?? undefined);
-        } else {
-          announceMessage("Audio test successful. Queue announcements are now active.");
-        }
-      }, 600);
+  // Fullscreen toggle
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      containerRef.current?.requestFullscreen?.();
+      setIsFullscreen(true);
+    } else {
+      document.exitFullscreen?.();
+      setIsFullscreen(false);
     }
   };
 
-  if (!hasStarted) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-900 text-white flex-col gap-8 p-6">
-        <div className="grid h-24 w-24 place-items-center rounded-3xl bg-gradient-to-br from-violet-600 to-blue-600 shadow-2xl shadow-violet-600/50">
-          <Monitor className="h-12 w-12 text-white" />
-        </div>
-        <div className="text-center max-w-lg">
-          <h1 className="text-4xl font-bold font-display mb-4 tracking-tight">Ready to start display</h1>
-          <p className="text-slate-400 text-lg mb-8">
-            Browsers require a user interaction to allow audio playback. Please click the button below to start the display and enable queue announcements.
-          </p>
-          <button
-            onClick={handleStartDisplay}
-            className="h-16 px-12 rounded-full bg-white text-slate-900 text-xl font-bold hover:bg-slate-100 transition-all hover:scale-105 active:scale-95 shadow-xl"
-          >
-            Start Display Screen
-          </button>
-        </div>
-      </div>
-    );
-  }
+  // Fetch everything
+  const fetchAll = useCallback(async () => {
+    if (!orgId) return;
+    const [tkn, svc, ctr, org] = await Promise.all([
+      supabase.from("tokens").select("*, services(name, prefix), counters(counter_number)").eq("organization_id", orgId).in("status", ["waiting", "serving"]).order("priority_rank").order("created_at"),
+      supabase.from("services").select("*").eq("organization_id", orgId),
+      supabase.from("counters").select("*, services(name)").eq("organization_id", orgId),
+      supabase.from("organizations").select("*").eq("id", orgId).maybeSingle(),
+    ]);
+    setTokens(tkn.data || []);
+    setServices(svc.data || []);
+    setCounters(ctr.data || []);
+    setOrgSettings(org.data);
+  }, [orgId]);
+
+  useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  // Real-time subscription
+  useEffect(() => {
+    if (!orgId) return;
+    const channel = supabase
+      .channel(`display-tokens-${orgId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "tokens", filter: `organization_id=eq.${orgId}` }, (payload: any) => {
+        fetchAll();
+        // TTS for newly serving tokens
+        if (payload.eventType === "UPDATE" && payload.new?.status === "serving" && !announcedRef.current.has(payload.new.id)) {
+          const tok = payload.new;
+          setCurrentCallToken(tok);
+          if (!muted) {
+            const counterNum = tok.counter_id
+              ? counters.find((c) => c.id === tok.counter_id)?.counter_number || ""
+              : "";
+            const msg = counterNum
+              ? `Token ${tok.token_number}, please proceed to counter ${counterNum}`
+              : `Token ${tok.token_number}, please proceed to the counter`;
+            announceMessage(msg);
+          }
+          setAnnouncedIds((prev) => new Set(prev).add(tok.id));
+          setTimeout(() => setCurrentCallToken(null), 10000);
+        }
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [orgId, muted, counters, fetchAll]);
+
+  const servingTokens = tokens.filter((t) => t.status === "serving");
+  const waitingTokens = tokens.filter((t) => t.status === "waiting");
+  const orgName = orgSettings?.name || "Smart Queue";
+  const primaryColor = orgSettings?.primary_color || "#7c3aed";
+  const logoUrl = orgSettings?.logo_url;
+  const displayAds: string[] = (orgSettings?.display_ads as string[]) || [];
+
+  // Get waiting count per service
+  const waitingByService = services.map((s) => ({
+    ...s,
+    waitCount: waitingTokens.filter((t) => t.service_id === s.id).length,
+  }));
+
+  // Next tokens preview (top 3 waiting)
+  const nextUp = waitingTokens.slice(0, 5);
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden">
-      {/* Background Decor */}
-      <div className="pointer-events-none fixed inset-0 -z-10">
-        <div className="absolute inset-x-0 top-0 h-[600px] bg-gradient-to-br from-violet-100/50 via-blue-50/50 to-transparent blur-3xl" />
+    <div ref={containerRef} className="min-h-[100dvh] bg-slate-950 text-white font-sans flex flex-col overflow-hidden relative select-none" onClick={() => unlockAudio()}>
+      {/* Animated background */}
+      <div className="pointer-events-none fixed inset-0 -z-10 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+        <div className="absolute inset-x-0 top-0 h-[60%] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-violet-900/30 via-transparent to-transparent" />
+        <div className="absolute inset-x-0 bottom-0 h-[40%] bg-[radial-gradient(ellipse_at_bottom,_var(--tw-gradient-stops))] from-blue-900/20 via-transparent to-transparent" />
       </div>
 
       {/* Header */}
-      <header className="border-b border-slate-200 bg-white/85 backdrop-blur-2xl">
-        <div className="flex items-center justify-between px-5 py-4 sm:px-8 lg:px-10 lg:py-5">
-          <div className="flex items-center gap-3 sm:gap-4 min-w-0">
-            <div className="grid h-11 w-11 sm:h-12 sm:w-12 place-items-center rounded-2xl bg-gradient-to-br from-violet-600 to-blue-600 shadow-lg shadow-violet-500/20 shrink-0">
-              <Monitor className="h-5 w-5 sm:h-6 sm:w-6 text-white" />
+      <header className="shrink-0 px-6 py-4 flex items-center justify-between border-b border-white/5 bg-black/20 backdrop-blur-xl relative z-20">
+        <div className="flex items-center gap-4">
+          {logoUrl ? (
+            <img src={logoUrl} alt={orgName} className="h-12 w-12 rounded-2xl object-cover shadow-xl" />
+          ) : (
+            <div className="grid h-12 w-12 place-items-center rounded-2xl shadow-xl" style={{ background: `linear-gradient(135deg, ${primaryColor}, ${primaryColor}99)` }}>
+              <span className="text-xl font-black text-white">Q</span>
             </div>
-            <div className="min-w-0">
-              <h1 className="text-lg sm:text-xl lg:text-2xl font-bold font-display tracking-tight text-slate-900 truncate">{orgName}</h1>
-              <p className="text-xs sm:text-sm font-medium text-slate-500 uppercase tracking-[0.2em] sm:tracking-widest">Queue Display System</p>
-            </div>
+          )}
+          <div>
+            <h1 className="text-2xl font-black font-display text-white tracking-tight">{orgName}</h1>
+            <p className="text-sm font-bold text-white/50 uppercase tracking-widest">Queue Display</p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4">
+          {/* Current time */}
+          <div className="flex items-center gap-2 text-white/60 text-lg font-mono font-bold">
+            <Clock className="h-5 w-5" />
+            {new Date(now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
           </div>
 
-          <div className="flex items-center gap-3 sm:gap-6">
-            {nextWaitingToken && (
-              <button
-                onClick={() => announceNextInQueue(nextWaitingToken.token_number, nextWaitingPosition ?? undefined)}
-                className="inline-flex items-center gap-2 rounded-full px-3 sm:px-4 py-2 text-xs sm:text-sm font-semibold transition-all shadow-sm bg-slate-50 text-slate-700 border border-slate-200"
-              >
-                Announce Next
-              </button>
-            )}
+          {/* Mute toggle */}
+          <button onClick={() => { setMuted(!muted); if (muted) { unlockAudio(); } }} className="h-10 w-10 rounded-xl bg-white/10 hover:bg-white/20 grid place-items-center transition-all">
+            {muted ? <VolumeX className="h-5 w-5 text-white/60" /> : <Volume2 className="h-5 w-5 text-white" />}
+          </button>
 
-            <button
-              onClick={handleTestAudio}
-              className="inline-flex items-center gap-2 rounded-full px-3 sm:px-4 py-2 text-xs sm:text-sm font-semibold transition-all shadow-sm bg-violet-50 text-violet-700 border border-violet-200"
-            >
-              <BadgeInfo className="h-4 w-4" />
-              Test Audio
-            </button>
-
-            <button
-              onClick={() => setAudioEnabled(!audioEnabled)}
-              className={`inline-flex items-center gap-2 rounded-full px-3 sm:px-4 py-2 text-xs sm:text-sm font-semibold transition-all shadow-sm ${
-                audioEnabled
-                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                  : "bg-slate-100 text-slate-600 border border-slate-200"
-              }`}
-            >
-              {audioEnabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
-              {audioEnabled ? "Audio On" : "Audio Off"}
-            </button>
-
-            <div className="text-right hidden sm:block">
-              <p className="text-2xl lg:text-3xl font-bold text-slate-900 tracking-tight tabular-nums font-display drop-shadow-sm">
-                {currentTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-              </p>
-              <p className="text-[11px] lg:text-xs font-medium text-slate-500">
-                {currentTime.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" })}
-              </p>
-            </div>
-          </div>
+          {/* Fullscreen toggle */}
+          <button onClick={toggleFullscreen} className="h-10 w-10 rounded-xl bg-white/10 hover:bg-white/20 grid place-items-center transition-all">
+            <Maximize2 className="h-5 w-5 text-white/60" />
+          </button>
         </div>
       </header>
 
-      <main className="px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-        {/* Hero Now Serving */}
-        <section className="mb-8 lg:mb-10">
-          <div className="flex items-center gap-3 mb-4 lg:mb-6">
-            <h2 className="text-xs sm:text-sm font-bold text-slate-400 uppercase tracking-[0.24em] sm:tracking-widest">Now Serving</h2>
-            <div className="h-px flex-1 bg-slate-200" />
+      {/* Current Call Banner */}
+      {currentCallToken && (
+        <div className="animate-scale-in shrink-0 mx-6 mt-4 rounded-3xl bg-gradient-to-r from-emerald-500 to-teal-500 p-6 flex items-center justify-between shadow-2xl shadow-emerald-500/20 relative overflow-hidden">
+          <div className="absolute inset-0 bg-white/5 animate-pulse-slow" />
+          <div className="flex items-center gap-6 relative z-10">
+            <div className="grid h-16 w-16 place-items-center rounded-2xl bg-white/20 backdrop-blur-xl">
+              <Bell className="h-8 w-8 text-white animate-bounce" />
+            </div>
+            <div>
+              <p className="text-lg font-bold text-white/80 uppercase tracking-widest">Now Calling</p>
+              <p className="text-5xl font-black font-display text-white tracking-tight">{currentCallToken.token_number}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 relative z-10 bg-white/10 backdrop-blur-xl rounded-2xl px-6 py-4">
+            <ArrowRight className="h-6 w-6 text-white" />
+            <p className="text-2xl font-black text-white">
+              Counter {counters.find((c) => c.id === currentCallToken.counter_id)?.counter_number || "—"}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Main Content: Split Layout */}
+      <main className="flex-1 flex flex-col lg:flex-row gap-4 p-6 min-h-0">
+        {/* Left: Now Serving at Counters */}
+        <section className="flex-1 flex flex-col gap-4 min-w-0">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-black text-white/80 uppercase tracking-widest flex items-center gap-3">
+              <Monitor className="h-6 w-6 text-violet-400" /> Now Serving
+            </h2>
+            <span className="text-sm font-bold text-white/40 bg-white/5 rounded-full px-4 py-1.5">{servingTokens.length} active</span>
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-[1.35fr_0.65fr]">
-            <div className={`relative overflow-hidden rounded-[2rem] sm:rounded-[2.5rem] border bg-white shadow-xl shadow-slate-200/60 transition-all duration-500 ${currentServingToken ? "border-emerald-200" : "border-slate-200"}`}>
-              {previewToken && animatingToken === previewToken.token_number && (
-                <div className="absolute inset-0 rounded-[2rem] sm:rounded-[2.5rem] animate-pulse-glow pointer-events-none border-2 border-emerald-400/40" />
-              )}
-
-              <div className="relative p-5 sm:p-6 lg:p-8 xl:p-10 min-h-[240px] sm:min-h-[280px] flex flex-col justify-between">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <p className="text-[10px] sm:text-xs font-bold text-slate-400 uppercase tracking-[0.25em] sm:tracking-widest mb-2">{previewTitle}</p>
-                    <div className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-bold capitalize ${
-                      currentServingToken
-                        ? currentServingToken.priority_level === "urgent" ? "bg-red-100 text-red-700"
-                          : currentServingToken.priority_level === "vip" ? "bg-amber-100 text-amber-700"
-                          : currentServingToken.priority_level === "elderly" ? "bg-teal-100 text-teal-700"
-                          : "bg-blue-100 text-blue-700"
-                        : "bg-slate-100 text-slate-500"
+          {servingTokens.length > 0 ? (
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 auto-rows-fr flex-1">
+              {servingTokens.map((tok) => (
+                <div key={tok.id} className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-6 flex flex-col items-center justify-center text-center hover:bg-white/10 transition-all group relative overflow-hidden">
+                  <div className="absolute inset-0 bg-gradient-to-br from-violet-500/5 to-blue-500/5 opacity-0 group-hover:opacity-100 transition-opacity" />
+                  <p className="text-5xl sm:text-6xl font-black font-display text-white tracking-tighter mb-3 relative z-10">{tok.token_number}</p>
+                  <p className="text-sm font-bold text-violet-400 uppercase tracking-widest mb-2 relative z-10">{tok.services?.name}</p>
+                  <div className="flex items-center gap-2 bg-violet-500/20 backdrop-blur-xl text-violet-300 rounded-full px-4 py-2 font-bold text-sm relative z-10">
+                    <Hash className="h-4 w-4" />
+                    Counter {tok.counters?.counter_number || "—"}
+                  </div>
+                  {tok.priority_level && tok.priority_level !== "normal" && (
+                    <span className={`mt-3 inline-flex px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider relative z-10 ${
+                      tok.priority_level === "vip" ? "bg-amber-500/20 text-amber-400" :
+                      tok.priority_level === "elderly" ? "bg-teal-500/20 text-teal-400" :
+                      "bg-red-500/20 text-red-400"
                     }`}>
-                      {currentServingToken ? currentServingToken.priority_level || "Normal" : nextWaitingToken ? "Waiting" : "No active token"}
-                    </div>
-                  </div>
-
-                  <div className="text-right">
-                    <p className="text-[10px] sm:text-xs font-bold text-slate-400 uppercase tracking-[0.24em] sm:tracking-widest mb-1">Counter</p>
-                            <p className="text-3xl sm:text-4xl lg:text-5xl font-black text-violet-600 font-display leading-none">
-                              {currentServingToken ? currentServingCounter?.counter_number || "Unassigned" : "--"}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex flex-col items-center justify-center py-6 sm:py-8 lg:py-10">
-                  {previewToken ? (
-                    <>
-                      <div className={`text-[4.5rem] sm:text-[6rem] lg:text-[8rem] leading-none font-black tracking-tighter font-display mb-3 sm:mb-4 transition-colors ${animatingToken === previewToken.token_number ? "text-emerald-600" : "text-slate-900"}`}>
-                        {previewToken.token_number}
-                      </div>
-                      <p className="text-sm sm:text-lg lg:text-2xl font-medium text-slate-500 text-center max-w-2xl">
-                        {previewToken.services?.name || "Service"}
-                      </p>
-                      {!currentServingToken && nextWaitingToken && (
-                        <p className="mt-2 text-xs sm:text-sm font-semibold text-violet-600 text-center">
-                          Queue position {nextWaitingPosition}
-                        </p>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      <div className="text-5xl sm:text-7xl lg:text-8xl font-black text-slate-300 tracking-tight font-display mb-2">--</div>
-                      <p className="text-sm sm:text-base lg:text-xl font-medium text-slate-500 text-center">No one is currently being served. Call the next token from staff to begin.</p>
-                    </>
+                      {tok.priority_level}
+                    </span>
                   )}
                 </div>
-
-                <div className="grid grid-cols-2 gap-3 pt-4 border-t border-slate-100">
-                  <div className="rounded-2xl bg-slate-50 px-4 py-3">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.24em]">Queue</p>
-                    <p className="mt-1 text-xl font-black text-slate-900 font-display">{waitingTokens.length} waiting</p>
-                  </div>
-                  <div className="rounded-2xl bg-slate-50 px-4 py-3">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.24em]">Next</p>
-                    <p className="mt-1 text-xl font-black text-slate-900 font-display truncate">{nextWaitingToken?.token_number || "--"}</p>
-                  </div>
-                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="flex-1 grid place-items-center rounded-3xl border border-white/5 bg-white/[2%]">
+              <div className="text-center text-white/30 space-y-3">
+                <Monitor className="h-12 w-12 mx-auto opacity-50" />
+                <p className="text-lg font-bold">No tokens currently being served</p>
               </div>
             </div>
-
-            <div className="rounded-[2rem] sm:rounded-[2.5rem] border border-slate-200 bg-white shadow-xl shadow-slate-200/60 p-5 sm:p-6 lg:p-8">
-              <p className="text-xs font-bold text-slate-400 uppercase tracking-[0.24em] sm:tracking-widest mb-4">Active Counters</p>
-              <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-1">
-                {Array.from(counterMap.entries())
-                  .sort(([a], [b]) => a - b)
-                  .slice(0, 4)
-                  .map(([counterNum, { counter, token }]) => (
-                    <div
-                      key={counterNum}
-                      className={`rounded-2xl border p-4 transition-all duration-300 ${
-                        token
-                          ? animatingToken === token.token_number
-                            ? "border-emerald-300 bg-emerald-50 shadow-lg shadow-emerald-500/10"
-                            : "border-slate-200 bg-slate-50"
-                          : "border-dashed border-slate-200 bg-slate-50/70 opacity-75"
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.24em]">Counter {counterNum}</p>
-                          <p className="mt-1 text-sm sm:text-base font-semibold text-slate-700 truncate">{counter.services?.name || "Service"}</p>
-                        </div>
-                        <div className="text-right">
-                          <p className={`text-lg sm:text-xl font-black font-display leading-none ${token ? "text-slate-900" : "text-slate-300"}`}>
-                            {token?.token_number || "--"}
-                          </p>
-                          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400 mt-1">
-                            {token ? (token.priority_level || "normal") : "waiting"}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-              </div>
-            </div>
-          </div>
+          )}
         </section>
 
-        {/* Up Next Strip */}
-        {waitingTokens.length > 0 && (
-          <div className="animate-fade-up">
-            <div className="flex items-center gap-3 mb-4 lg:mb-6">
-              <h2 className="text-xs sm:text-sm font-bold text-slate-400 uppercase tracking-[0.24em] sm:tracking-widest">Waiting Queue</h2>
-              <div className="h-px flex-1 bg-slate-200" />
-            </div>
-            <div className="rounded-[2rem] sm:rounded-[2.5rem] border border-slate-200 bg-white p-4 sm:p-5 lg:p-6 shadow-sm overflow-hidden relative">
-              <div className="absolute top-0 right-0 w-32 h-full bg-gradient-to-l from-white to-transparent z-10 pointer-events-none" />
-              <div className="absolute top-0 left-0 w-8 h-full bg-gradient-to-r from-white to-transparent z-10 pointer-events-none" />
-              
-              <div className="flex items-center gap-3 overflow-x-auto pb-2 -mb-2 no-scrollbar px-1 sm:px-2">
-                <div className="shrink-0 flex items-center gap-2 mr-3 sm:mr-4 bg-slate-50 px-3 sm:px-4 py-2 rounded-2xl border border-slate-100">
-                  <span className="relative flex h-3 w-3">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-violet-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-3 w-3 bg-violet-500"></span>
-                  </span>
-                  <span className="text-xs sm:text-sm font-bold text-slate-600">{waitingTokens.length} Waiting</span>
-                </div>
-
-                {waitingTokens.map((token, index) => (
-                  <div
-                    key={token.id}
-                    className="shrink-0 flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 sm:px-5 py-3 shadow-sm hover:border-violet-300 transition-colors"
-                  >
-                    <span className="text-xs sm:text-sm font-bold text-slate-400">#{index + 1}</span>
-                    <div className="h-6 w-px bg-slate-200" />
-                    <div>
-                      <p className="text-lg sm:text-xl font-bold font-display leading-none text-slate-900">{token.token_number}</p>
-                      <div className="flex items-center gap-2 mt-1">
-                        <span className={`text-[10px] uppercase font-bold tracking-wider ${
-                          token.priority_level === "urgent" ? "text-red-500" :
-                          token.priority_level === "vip" ? "text-amber-500" :
-                          token.priority_level === "elderly" ? "text-teal-500" :
-                          "text-blue-500"
-                        }`}>
-                          {token.priority_level || "Normal"}
-                        </span>
-                        <span className="text-[10px] text-slate-400 font-medium truncate max-w-24">{token.services?.name}</span>
-                      </div>
+        {/* Right Sidebar: Queue Info */}
+        <aside className="lg:w-[380px] xl:w-[420px] flex flex-col gap-4 shrink-0">
+          {/* Next Up */}
+          <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-5 flex-shrink-0">
+            <h3 className="text-sm font-black text-white/60 uppercase tracking-widest mb-4 flex items-center gap-2">
+              <Zap className="h-4 w-4 text-amber-400" /> Next Up
+            </h3>
+            {nextUp.length > 0 ? (
+              <div className="space-y-2">
+                {nextUp.map((tok, idx) => (
+                  <div key={tok.id} className={`flex items-center justify-between rounded-2xl px-4 py-3 transition-all ${
+                    idx === 0 ? "bg-violet-500/15 border border-violet-500/20" : "bg-white/[3%] border border-white/5"
+                  }`}>
+                    <div className="flex items-center gap-3">
+                      <span className={`text-2xl font-black font-display ${idx === 0 ? "text-violet-300" : "text-white/70"}`}>{tok.token_number}</span>
+                      {tok.priority_level && tok.priority_level !== "normal" && (
+                        <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-md ${
+                          tok.priority_level === "vip" ? "bg-amber-500/20 text-amber-400" :
+                          tok.priority_level === "elderly" ? "bg-teal-500/20 text-teal-400" :
+                          "bg-red-500/20 text-red-400"
+                        }`}>{tok.priority_level}</span>
+                      )}
                     </div>
+                    <span className="text-xs font-bold text-white/40">{tok.services?.name}</span>
                   </div>
                 ))}
               </div>
+            ) : (
+              <p className="text-sm font-medium text-white/30 text-center py-4">Queue is empty</p>
+            )}
+          </div>
+
+          {/* Waiting Count by Service */}
+          <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-5 flex-shrink-0">
+            <h3 className="text-sm font-black text-white/60 uppercase tracking-widest mb-4 flex items-center gap-2">
+              <Users className="h-4 w-4 text-blue-400" /> Waiting by Service
+            </h3>
+            <div className="space-y-2">
+              {waitingByService.map((s) => (
+                <div key={s.id} className="flex items-center justify-between rounded-2xl bg-white/[3%] border border-white/5 px-4 py-3">
+                  <span className="text-sm font-bold text-white/70">{s.name}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg font-black text-white">{s.waitCount}</span>
+                    <span className="text-xs text-white/40">waiting</span>
+                  </div>
+                </div>
+              ))}
+              {waitingByService.length === 0 && (
+                <p className="text-sm font-medium text-white/30 text-center py-3">No services</p>
+              )}
             </div>
           </div>
-        )}
+
+          {/* Summary */}
+          <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-xl p-5 flex-shrink-0">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-2xl bg-violet-500/10 border border-violet-500/10 p-4 text-center">
+                <p className="text-3xl font-black font-display text-violet-300">{servingTokens.length}</p>
+                <p className="text-xs font-bold text-white/40 uppercase tracking-wider mt-1">Serving</p>
+              </div>
+              <div className="rounded-2xl bg-amber-500/10 border border-amber-500/10 p-4 text-center">
+                <p className="text-3xl font-black font-display text-amber-300">{waitingTokens.length}</p>
+                <p className="text-xs font-bold text-white/40 uppercase tracking-wider mt-1">Waiting</p>
+              </div>
+            </div>
+          </div>
+        </aside>
       </main>
+
+      {/* Bottom Ad/Info Bar */}
+      {displayAds.length > 0 && (
+        <footer className="shrink-0 border-t border-white/5 bg-black/30 backdrop-blur-xl px-6 py-3">
+          <div className="flex items-center gap-4 overflow-hidden">
+            <span className="shrink-0 text-xs font-bold text-white/40 uppercase tracking-widest bg-white/5 px-3 py-1 rounded-full">Info</span>
+            <p className="text-sm font-medium text-white/60 truncate animate-fade-up" key={adIndex}>
+              {displayAds[adIndex]}
+            </p>
+          </div>
+        </footer>
+      )}
     </div>
   );
 }

@@ -5,8 +5,10 @@ export interface HardwarePrintPayload {
   priorityLevel: string;
   createdAtIso: string;
   customerName?: string | null;
+  customerPhone?: string | null;
   visitReason?: string | null;
   trackingUrl?: string | null;
+  estimatedWait?: number | null;
 }
 
 interface BridgeResponse {
@@ -29,6 +31,9 @@ const DEFAULT_ENDPOINTS = [
   "http://localhost:3210/print-token",
 ];
 
+const MAX_RETRIES = 2;
+const TIMEOUT_MS = 5000;
+
 function normalizeEndpoint(raw: string): string {
   const trimmed = raw.trim().replace(/\/+$/, "");
   if (!trimmed) return "";
@@ -46,7 +51,7 @@ function resolveEndpoints(): string[] {
   return Array.from(unique);
 }
 
-async function postWithTimeout(endpoint: string, payload: HardwarePrintPayload, timeoutMs = 2500): Promise<BridgeResponse> {
+async function postWithTimeout(endpoint: string, payload: HardwarePrintPayload, timeoutMs = TIMEOUT_MS): Promise<BridgeResponse> {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
 
@@ -83,22 +88,31 @@ export async function printTokenWithBridge(payload: HardwarePrintPayload): Promi
   let lastError = "Printer bridge not reachable";
 
   for (const endpoint of endpoints) {
-    try {
-      const response = await postWithTimeout(endpoint, payload);
-      if (response.ok !== false) {
-        return {
-          success: true,
-          endpoint,
-          jobId: response.jobId,
-          printerName: response.printerName,
-        };
-      }
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const response = await postWithTimeout(endpoint, payload);
+        if (response.ok !== false) {
+          return {
+            success: true,
+            endpoint,
+            jobId: response.jobId,
+            printerName: response.printerName,
+          };
+        }
 
-      lastError = response.message || `Bridge rejected print at ${endpoint}`;
-    } catch (error: any) {
-      lastError = error?.name === "AbortError"
-        ? `Timed out contacting ${endpoint}`
-        : (error?.message || `Failed to connect to ${endpoint}`);
+        lastError = response.message || `Bridge rejected print at ${endpoint}`;
+        break; // Don't retry if bridge explicitly rejected
+      } catch (error: any) {
+        if (error?.name === "AbortError") {
+          lastError = `Timed out contacting ${endpoint}`;
+        } else {
+          lastError = error?.message || `Failed to connect to ${endpoint}`;
+        }
+        // Only retry on connection errors, not on explicit rejections
+        if (attempt < MAX_RETRIES) {
+          await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+        }
+      }
     }
   }
 
@@ -106,4 +120,24 @@ export async function printTokenWithBridge(payload: HardwarePrintPayload): Promi
     success: false,
     error: lastError,
   };
+}
+
+/**
+ * Check if the printer bridge is reachable.
+ */
+export async function isPrinterBridgeOnline(): Promise<boolean> {
+  const endpoints = resolveEndpoints();
+  for (const endpoint of endpoints) {
+    const healthUrl = endpoint.replace("/print-token", "/health");
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch(healthUrl, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok) return true;
+    } catch {
+      // Try next
+    }
+  }
+  return false;
 }
